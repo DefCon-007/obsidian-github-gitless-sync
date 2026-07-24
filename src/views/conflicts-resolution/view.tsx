@@ -1,4 +1,4 @@
-import { IconName, ItemView, Menu, Platform, WorkspaceLeaf } from "obsidian";
+import { IconName, ItemView, Platform, WorkspaceLeaf } from "obsidian";
 import { Root, createRoot } from "react-dom/client";
 import GitHubSyncPlugin from "src/main";
 import { ConflictFile, ConflictResolution } from "src/sync-manager";

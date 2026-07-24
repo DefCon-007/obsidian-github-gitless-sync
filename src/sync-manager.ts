@@ -7,6 +7,7 @@ import {
 } from "obsidian";
 import GithubClient, {
   GetTreeResponseItem,
+  GithubAPIError,
   NewTreeRequestItem,
   RepoContent,
 } from "./github/client";
@@ -122,7 +123,10 @@ export default class SyncManager {
       // and contains no files.
       // 404 instead is returned in case there are no files.
       // Either way we can handle both by commiting a new empty manifest.
-      if (err.status !== 409 && err.status !== 404) {
+      if (
+        !(err instanceof GithubAPIError) ||
+        (err.status !== 409 && err.status !== 404)
+      ) {
         this.syncing = false;
         throw err;
       }
@@ -255,7 +259,10 @@ export default class SyncManager {
         }
 
         const normalizedPath = normalizePath(targetPath);
-        await this.vault.adapter.writeBinary(normalizedPath, data);
+        await this.vault.adapter.writeBinary(
+          normalizedPath,
+          Uint8Array.from(data).buffer,
+        );
         await this.logger.info("Written file", {
           normalizedPath,
         });
@@ -654,7 +661,7 @@ export default class SyncManager {
     localFiles: { [key: string]: FileMetadata },
     conflictFiles: string[],
   ) {
-    let actions: SyncAction[] = [];
+    const actions: SyncAction[] = [];
 
     const commonFiles = Object.keys(remoteFiles)
       .filter((filePath) => filePath in localFiles)
@@ -983,8 +990,8 @@ export default class SyncManager {
     await this.metadataStore.load();
     if (Object.keys(this.metadataStore.data.files).length === 0) {
       await this.logger.info("Metadata was empty, loading all files");
-      let files = [];
-      let folders = [this.vault.getRoot().path];
+      const files = [];
+      const folders = [this.vault.getRoot().path];
       while (folders.length > 0) {
         const folder = folders.pop();
         if (folder === undefined) {
@@ -1043,8 +1050,8 @@ export default class SyncManager {
   async addConfigDirToMetadata() {
     await this.logger.info("Adding config dir to metadata");
     // Get all the files in the config dir
-    let files = [];
-    let folders = [this.vault.configDir];
+    const files = [];
+    const folders = [this.vault.configDir];
     while (folders.length > 0) {
       const folder = folders.pop();
       if (folder === undefined) {

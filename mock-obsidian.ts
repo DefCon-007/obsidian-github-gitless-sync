@@ -156,7 +156,7 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  return Buffer.from(base64, "base64");
+  return Uint8Array.from(Buffer.from(base64, "base64")).buffer;
 }
 
 // Mock Event reference

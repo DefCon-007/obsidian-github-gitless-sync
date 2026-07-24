@@ -8,6 +8,7 @@ import {
   createLineDecorations,
   createResolutionDecorations,
 } from "./decorations";
+import { ConflictRange } from "./conflict-range";
 
 interface DiffViewProps {
   initialRemoteText: string;
@@ -32,8 +33,8 @@ const createUnifiedDocument = (
   const remoteLines = remoteText.split(/\r?\n/);
   const localLines = localText.split(/\r?\n/);
 
-  let result: string[] = [];
-  let lineRanges: ConflictRange[] = [];
+  const result: string[] = [];
+  const lineRanges: ConflictRange[] = [];
   let linePosition = 0;
   let currentRange: ConflictRange | null = null;
 

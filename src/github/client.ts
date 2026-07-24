@@ -50,7 +50,7 @@ export type BlobFile = {
 /**
  * Custom error to make some stuff easier
  */
-class GithubAPIError extends Error {
+export class GithubAPIError extends Error {
   constructor(
     public status: number,
     message: string,

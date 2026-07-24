@@ -127,11 +127,12 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       dropdown
         .addOptions(syncStrategies)
         .setValue(this.plugin.settings.syncStrategy)
-        .onChange(async (value: keyof typeof syncStrategies) => {
-          intervalSettings.setDisabled(value !== "interval");
-          this.plugin.settings.syncStrategy = value;
+        .onChange(async (value) => {
+          const strategy = value as keyof typeof syncStrategies;
+          intervalSettings.setDisabled(strategy !== "interval");
+          this.plugin.settings.syncStrategy = strategy;
           await this.plugin.saveSettings();
-          if (value === "interval") {
+          if (strategy === "interval") {
             this.plugin.startSyncInterval();
           } else {
             this.plugin.stopSyncInterval();
@@ -183,8 +184,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
         dropdown
           .addOptions(conflictHandlingOptions)
           .setValue(this.plugin.settings.conflictHandling)
-          .onChange(async (value: keyof typeof conflictHandlingOptions) => {
-            this.plugin.settings.conflictHandling = value;
+          .onChange(async (value) => {
+            this.plugin.settings.conflictHandling =
+              value as keyof typeof conflictHandlingOptions;
             await this.plugin.saveSettings();
           });
       });
@@ -249,8 +251,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
         dropdown
           .addOptions(diffModeOptions)
           .setValue(this.plugin.settings.conflictViewMode)
-          .onChange(async (value: keyof typeof diffModeOptions) => {
-            this.plugin.settings.conflictViewMode = value;
+          .onChange(async (value) => {
+            this.plugin.settings.conflictViewMode =
+              value as keyof typeof diffModeOptions;
             await this.plugin.saveSettings();
           });
       });

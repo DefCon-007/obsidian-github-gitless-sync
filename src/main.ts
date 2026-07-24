@@ -2,7 +2,6 @@ import {
   EventRef,
   Plugin,
   WorkspaceLeaf,
-  normalizePath,
   Notice,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
@@ -15,9 +14,9 @@ import {
 } from "./views/conflicts-resolution/view";
 
 export default class GitHubSyncPlugin extends Plugin {
-  settings: GitHubSyncSettings;
-  syncManager: SyncManager;
-  logger: Logger;
+  declare settings: GitHubSyncSettings;
+  syncManager!: SyncManager;
+  logger!: Logger;
 
   statusBarItem: HTMLElement | null = null;
   syncRibbonIcon: HTMLElement | null = null;
@@ -265,10 +264,11 @@ export default class GitHubSyncPlugin extends Plugin {
 
   async onConflicts(conflicts: ConflictFile[]): Promise<ConflictResolution[]> {
     this.conflicts = conflicts;
-    return await new Promise(async (resolve) => {
+    return await new Promise((resolve, reject) => {
       this.conflictsResolver = resolve;
-      await this.activateView();
-      this.getConflictsView()?.setConflictFiles(conflicts);
+      this.activateView()
+        .then(() => this.getConflictsView()?.setConflictFiles(conflicts))
+        .catch(reject);
     });
   }
 

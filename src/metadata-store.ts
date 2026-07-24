@@ -43,7 +43,7 @@ export interface Metadata {
  * Data is saved as JSON in the .obsidian folder in the current Vault.
  */
 export default class MetadataStore {
-  data: Metadata;
+  data: Metadata = { lastSync: 0, files: {} };
   private metadataFile: string;
   private writeQueue: Promise<void> = Promise.resolve();
 

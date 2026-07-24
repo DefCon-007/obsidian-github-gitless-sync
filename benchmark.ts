@@ -74,7 +74,7 @@ const generateRandomFiles = (
   maxDepth: number,
   fileSize: number,
 ) => {
-  const metadata: { lastSync: number; files: { [key: string]: {} } } = {
+  const metadata: { lastSync: number; files: Record<string, object> } = {
     lastSync: 0,
     files: {},
   };
@@ -176,7 +176,8 @@ const cleanupRemote = () => {
     // Push changes
     execSync("git push", { stdio: "ignore", cwd: clonedDir });
   } catch (error) {
-    console.error(`Error: ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${message}`);
   }
 
   // Remove the folder when everything is done

@@ -1,4 +1,5 @@
 import { StateEffect, StateField } from "@uiw/react-codemirror";
+import { ConflictRange } from "./conflict-range";
 
 /// Possible transaction effects we can apply to the ranges state field
 /// when it gets updated.
@@ -38,7 +39,7 @@ export const createRangesStateField = (
       }
 
       // Map all positions through the changes and apply any effect
-      let newRanges = ranges
+      const newRanges = ranges
         .map((range, index) => {
           let source = range.source;
           const effect = rangeEffects.get(index) as RangeChangeSourceOperation;

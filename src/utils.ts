@@ -33,7 +33,7 @@ export function decodeBase64String(s: string): string {
 export async function copyToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text);
-  } catch (err) {
+  } catch {
     // Fallback for devices like iOS that don't support Clipboard API
     const textarea = document.createElement("textarea");
     textarea.value = text;

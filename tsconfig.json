@@ -4,15 +4,24 @@
     "inlineSourceMap": true,
     "inlineSources": true,
     "module": "ESNext",
-    "target": "ES6",
-    "allowJs": true,
+    "target": "ES2022",
     "jsx": "react-jsx",
-    "noImplicitAny": true,
     "moduleResolution": "node",
     "importHelpers": true,
     "isolatedModules": true,
-    "strictNullChecks": true,
-    "lib": ["DOM", "ES5", "ES6", "ES7"]
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "lib": ["DOM", "ES2022"]
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "benchmark.ts",
+    "mock-obsidian.ts"
+  ]
 }

@@ -9,6 +9,7 @@ import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import { createRoot } from "react-dom/client";
 import UnifiedResolutionBar from "./unified-resolution-bar";
 import { UpdateRangesEffect } from "./ranges-state-field";
+import { ConflictRange } from "./conflict-range";
 
 interface ResolutionWidgetProps {
   onAccept?: () => void;
@@ -109,7 +110,7 @@ export const createResolutionDecorations = (
     [rangesStateField],
     (state: EditorState) => {
       const ranges = state.field(rangesStateField);
-      let widgets: Range<Decoration>[] = [];
+      const widgets: Range<Decoration>[] = [];
 
       ranges.forEach((range: ConflictRange, index: number) => {
         if (range.source === "both") {
