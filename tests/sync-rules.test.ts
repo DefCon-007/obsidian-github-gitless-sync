@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   automaticConflictAction,
+  FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
   vaultListingIsEmpty,
 } from "../src/sync-rules";
@@ -19,6 +20,13 @@ test("a vault with content folders is not empty", () => {
 
 test("an otherwise empty vault may contain its config directory", () => {
   assert.equal(vaultListingIsEmpty([], [".obsidian"], ".obsidian"), true);
+});
+
+test("the first-sync safety error explains how to proceed", () => {
+  assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /First sync cannot start/u);
+  assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /prevent data loss/u);
+  assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /empty the repository/u);
+  assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /use an empty vault/u);
 });
 
 test("config files are excluded unless config sync is enabled", () => {

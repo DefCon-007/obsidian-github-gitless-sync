@@ -23,6 +23,7 @@ import GitHubSyncPlugin from "./main";
 import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 import {
   automaticConflictAction,
+  FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
   vaultListingIsEmpty,
 } from "./sync-rules";
@@ -159,9 +160,11 @@ export default class SyncManager {
     const vaultIsEmpty = await this.vaultIsEmpty();
 
     if (!repositoryIsEmpty && !vaultIsEmpty) {
-      // Both have files, we can't sync, show error
-      await this.logger.error("Both remote and local have files, can't sync");
-      throw new Error("Both remote and local have files, can't sync");
+      await this.logger.error(FIRST_SYNC_BOTH_SIDES_ERROR, {
+        localVaultContainsFiles: true,
+        remoteRepositoryContainsFiles: true,
+      });
+      throw new Error(FIRST_SYNC_BOTH_SIDES_ERROR);
     } else if (repositoryIsEmpty) {
       // Remote has no files and no manifest, let's just upload whatever we have locally.
       // This is fine even if the vault is empty.

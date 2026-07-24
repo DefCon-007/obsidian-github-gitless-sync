@@ -64,7 +64,10 @@ report.
 ### First sync
 
 > [!IMPORTANT]
-> The first sync will only work if either the remote repository or the local vault are completely **EMPTY**. If both contain files the first sync will fail.
+> The first sync requires either the remote repository or the local vault to be
+> completely **EMPTY**. If both contain files, the plugin stops to prevent data
+> loss. Use an empty repository to upload this vault, or use an empty vault to
+> download the repository.
 
 You must also configure the plugin settings before syncing.
 
