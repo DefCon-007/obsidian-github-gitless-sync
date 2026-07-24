@@ -18,7 +18,11 @@ export default class Logger {
     if (await this.vault.adapter.exists(this.logFile)) {
       return;
     }
-    this.vault.adapter.write(this.logFile, "");
+    await this.vault.adapter.write(this.logFile, "");
+  }
+
+  getFilePath(): string {
+    return this.logFile;
   }
 
   private async write(

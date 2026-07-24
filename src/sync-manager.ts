@@ -1,6 +1,5 @@
 import {
   Vault,
-  Notice,
   normalizePath,
   base64ToArrayBuffer,
   arrayBufferToBase64,
@@ -401,19 +400,12 @@ export default class SyncManager {
       return;
     }
 
-    const notice = new Notice("Syncing...");
     this.syncing = true;
     try {
       await this.syncImpl();
-      // Shown only if sync doesn't fail
-      new Notice("Sync successful", 5000);
-    } catch (err) {
-      // Show the error to the user, it's not automatically dismissed to make sure
-      // the user sees it.
-      new Notice(`Error syncing. ${err}`);
+    } finally {
+      this.syncing = false;
     }
-    this.syncing = false;
-    notice.hide();
   }
 
   private async syncImpl() {
@@ -1112,12 +1104,15 @@ export default class SyncManager {
    * Starts a new sync interval.
    * Raises an error if the interval is already running.
    */
-  startSyncInterval(minutes: number): number {
+  startSyncInterval(
+    minutes: number,
+    onSync: () => Promise<void>,
+  ): number {
     if (this.syncIntervalId) {
       throw new Error("Sync interval is already running");
     }
     this.syncIntervalId = window.setInterval(
-      async () => await this.sync(),
+      () => void onSync(),
       // Sync interval is set in minutes but setInterval expects milliseconds
       minutes * 60 * 1000,
     );
@@ -1132,14 +1127,6 @@ export default class SyncManager {
       window.clearInterval(this.syncIntervalId);
       this.syncIntervalId = null;
     }
-  }
-
-  /**
-   * Util function that stops and restart the sync interval
-   */
-  restartSyncInterval(minutes: number) {
-    this.stopSyncInterval();
-    return this.startSyncInterval(minutes);
   }
 
   async resetMetadata() {

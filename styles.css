@@ -7,3 +7,30 @@
     height: 100%;
     width: 100%;
 }
+
+.github-sync-ribbon-is-syncing svg {
+    animation: github-sync-spin 1s linear infinite;
+}
+
+.github-sync-ribbon-is-syncing {
+    cursor: progress;
+    pointer-events: none;
+}
+
+.github-sync-log-viewer {
+    max-height: 60vh;
+    overflow: auto;
+    padding: var(--size-4-3);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background: var(--background-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+}
+
+@keyframes github-sync-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

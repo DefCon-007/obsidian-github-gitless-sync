@@ -280,6 +280,27 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Open logs")
+      .setDesc(
+        "Open the complete sync log in your default text editor. On mobile, open it in an Obsidian viewer.",
+      )
+      .addButton((button) => {
+        button
+          .setButtonText("Open")
+          .setIcon("file-text")
+          .onClick(async () => {
+            try {
+              const destination = await this.plugin.openLogs();
+              if (destination === "default-app") {
+                new Notice("Opened sync logs", 3000);
+              }
+            } catch (error) {
+              new Notice(`Failed opening logs: ${error}`, 10000);
+            }
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Copy logs")
       .setDesc("Copy the log file content, this is useful to report bugs.")
       .addButton((button) => {

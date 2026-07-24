@@ -1,8 +1,12 @@
 import {
   EventRef,
+  FileSystemAdapter,
+  IconName,
   Plugin,
+  Platform,
   WorkspaceLeaf,
   Notice,
+  setIcon,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
@@ -12,6 +16,11 @@ import {
   ConflictsResolutionView,
   CONFLICTS_RESOLUTION_VIEW_TYPE,
 } from "./views/conflicts-resolution/view";
+import LogViewerModal from "./log-viewer";
+import {
+  SyncState,
+  syncPresentation,
+} from "./sync-status";
 
 export default class GitHubSyncPlugin extends Plugin {
   declare settings: GitHubSyncSettings;
@@ -38,6 +47,9 @@ export default class GitHubSyncPlugin extends Plugin {
   // and it gets destroyed.
   // By keeping them here we can recreate it easily.
   private conflicts: ConflictFile[] = [];
+  private syncInProgress = false;
+  private syncState: SyncState = "idle";
+  private syncStateResetTimer: number | null = null;
 
   async onUserEnable() {
     if (
@@ -80,7 +92,7 @@ export default class GitHubSyncPlugin extends Plugin {
     await this.loadSettings();
 
     this.logger = new Logger(this.app.vault, this.settings.enableLogging);
-    this.logger.init();
+    await this.logger.init();
 
     this.registerView(
       CONFLICTS_RESOLUTION_VIEW_TYPE,
@@ -150,24 +162,38 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
-    if (this.settings.firstSync) {
-      const notice = new Notice("Syncing...");
-      try {
+
+    if (this.syncInProgress) {
+      new Notice("A GitHub sync is already in progress", 3000);
+      return;
+    }
+
+    const notice = new Notice("Syncing with GitHub...");
+    this.syncInProgress = true;
+    this.setSyncState("syncing");
+    try {
+      if (this.settings.firstSync) {
         await this.syncManager.firstSync();
         this.settings.firstSync = false;
-        this.saveSettings();
-        // Shown only if sync doesn't fail
-        new Notice("Sync successful", 5000);
-      } catch (err) {
-        // Show the error to the user, it's not automatically dismissed to make sure
-        // the user sees it.
-        new Notice(`Error syncing. ${err}`);
+        await this.saveSettings();
+      } else {
+        await this.syncManager.sync();
       }
+      this.setSyncState("success");
+      new Notice("Sync successful", 5000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setSyncState("error");
+      new Notice(`Error syncing. ${message}`);
+      try {
+        await this.logger.error("Sync failed", { error: message });
+      } catch {
+        // Logging must never hide the sync failure from the user.
+      }
+    } finally {
+      this.syncInProgress = false;
       notice.hide();
-    } else {
-      await this.syncManager.sync();
     }
-    this.updateStatusBarItem();
   }
 
   async onunload() {
@@ -179,6 +205,7 @@ export default class GitHubSyncPlugin extends Plugin {
       return;
     }
     this.statusBarItem = this.addStatusBarItem();
+    this.updateStatusBarItem();
 
     if (!this.activeLeafChangeListener) {
       this.activeLeafChangeListener = this.app.workspace.on(
@@ -207,8 +234,15 @@ export default class GitHubSyncPlugin extends Plugin {
     if (!this.statusBarItem) {
       return;
     }
+    const presentation = syncPresentation(this.syncState);
+    if (presentation.statusText !== null) {
+      this.statusBarItem.setText(presentation.statusText);
+      return;
+    }
+
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile) {
+      this.statusBarItem.setText("GitHub: Ready");
       return;
     }
 
@@ -234,11 +268,80 @@ export default class GitHubSyncPlugin extends Plugin {
       "Sync with GitHub",
       this.sync.bind(this),
     );
+    this.renderSyncState();
   }
 
   hideSyncRibbonIcon() {
     this.syncRibbonIcon?.remove();
     this.syncRibbonIcon = null;
+  }
+
+  private setSyncState(state: SyncState) {
+    if (this.syncStateResetTimer !== null) {
+      window.clearTimeout(this.syncStateResetTimer);
+      this.syncStateResetTimer = null;
+    }
+
+    this.syncState = state;
+    this.renderSyncState();
+    this.updateStatusBarItem();
+
+    if (state === "success" || state === "error") {
+      this.syncStateResetTimer = window.setTimeout(() => {
+        this.syncStateResetTimer = null;
+        this.setSyncState("idle");
+      }, 5000);
+      this.registerInterval(this.syncStateResetTimer);
+    }
+  }
+
+  private renderSyncState() {
+    if (!this.syncRibbonIcon) {
+      return;
+    }
+
+    const presentation = syncPresentation(this.syncState);
+    setIcon(this.syncRibbonIcon, presentation.icon as IconName);
+    this.syncRibbonIcon.setAttribute("aria-label", presentation.tooltip);
+    this.syncRibbonIcon.setAttribute("data-tooltip-position", "right");
+    this.syncRibbonIcon.toggleClass(
+      "github-sync-ribbon-is-syncing",
+      this.syncState === "syncing",
+    );
+    this.syncRibbonIcon.setAttribute(
+      "aria-disabled",
+      this.syncState === "syncing" ? "true" : "false",
+    );
+  }
+
+  async openLogs(): Promise<"default-app" | "viewer"> {
+    await this.logger.init();
+
+    if (
+      Platform.isDesktopApp &&
+      this.app.vault.adapter instanceof FileSystemAdapter
+    ) {
+      try {
+        const { shell } = await import("electron");
+        const fullPath = this.app.vault.adapter.getFullPath(
+          this.logger.getFilePath(),
+        );
+        const error = await shell.openPath(fullPath);
+        if (error !== "") {
+          throw new Error(error);
+        }
+        return "default-app";
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.logger.warn("Failed to open logs in default app", {
+          error: message,
+        });
+      }
+    }
+
+    const logs = await this.logger.read();
+    new LogViewerModal(this.app, logs).open();
+    return "viewer";
   }
 
   showConflictsRibbonIcon() {
@@ -285,6 +388,7 @@ export default class GitHubSyncPlugin extends Plugin {
   startSyncInterval() {
     const intervalID = this.syncManager.startSyncInterval(
       this.settings.syncInterval,
+      this.sync.bind(this),
     );
     this.registerInterval(intervalID);
   }
@@ -295,7 +399,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
   restartSyncInterval() {
     this.syncManager.stopSyncInterval();
-    this.syncManager.startSyncInterval(this.settings.syncInterval);
+    this.startSyncInterval();
   }
 
   async reset() {
