@@ -1,6 +1,7 @@
 import { Vault, normalizePath } from "obsidian";
+import { MANIFEST_FILE_NAME } from "./constants";
 
-export const MANIFEST_FILE_NAME = "github-sync-metadata.json" as const;
+export { MANIFEST_FILE_NAME } from "./constants";
 
 /**
  * A file metadata.
@@ -69,12 +70,14 @@ export default class MetadataStore {
    * Save current metadata to disk.
    */
   async save() {
-    this.writeQueue = this.writeQueue.then(async () => {
-      await this.vault.adapter.write(
-        this.metadataFile,
-        JSON.stringify(this.data),
-      );
-    });
+    this.writeQueue = this.writeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        await this.vault.adapter.write(
+          this.metadataFile,
+          JSON.stringify(this.data),
+        );
+      });
     return this.writeQueue;
   }
 

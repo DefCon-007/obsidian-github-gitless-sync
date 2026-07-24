@@ -1,8 +1,9 @@
 import { Vault, TAbstractFile, TFolder } from "obsidian";
-import MetadataStore, { MANIFEST_FILE_NAME } from "./metadata-store";
+import MetadataStore from "./metadata-store";
 import { GitHubSyncSettings } from "./settings/settings";
-import Logger, { LOG_FILE_NAME } from "./logger";
+import Logger from "./logger";
 import GitHubSyncPlugin from "./main";
+import { isSyncablePath } from "./sync-rules";
 
 /**
  * Tracks changes to local sync directory and updates files metadata.
@@ -71,8 +72,17 @@ export default class EventsListener {
       return;
     }
 
-    this.metadataStore.data.files[filePath].deleted = true;
-    this.metadataStore.data.files[filePath].deletedAt = Date.now();
+    const deletedAt = Date.now();
+    const existing = this.metadataStore.data.files[filePath];
+    this.metadataStore.data.files[filePath] = {
+      path: filePath,
+      sha: existing?.sha ?? null,
+      dirty: true,
+      justDownloaded: false,
+      lastModified: existing?.lastModified ?? 0,
+      deleted: true,
+      deletedAt,
+    };
     await this.metadataStore.save();
     await this.logger.info("Updated deleted file", filePath);
   }
@@ -100,8 +110,17 @@ export default class EventsListener {
       );
       return;
     }
-    this.metadataStore.data.files[file.path].lastModified = Date.now();
-    this.metadataStore.data.files[file.path].dirty = true;
+    const modifiedAt = Date.now();
+    const existing = this.metadataStore.data.files[file.path];
+    this.metadataStore.data.files[file.path] = {
+      path: file.path,
+      sha: existing?.sha ?? null,
+      dirty: true,
+      justDownloaded: false,
+      lastModified: modifiedAt,
+      deleted: false,
+      deletedAt: null,
+    };
     await this.metadataStore.save();
     await this.logger.info("Updated modified file", file.path);
   }
@@ -136,27 +155,10 @@ export default class EventsListener {
   }
 
   private isSyncable(filePath: string) {
-    if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
-      // Manifest file must always be synced
-      return true;
-    } else if (
-      filePath === `${this.vault.configDir}/workspace.json` ||
-      filePath === `${this.vault.configDir}/workspace-mobile.json`
-    ) {
-      // Obsidian recommends not syncing the workspace files
-      return false;
-    } else if (filePath === `${this.vault.configDir}/${LOG_FILE_NAME}`) {
-      // Don't sync the log file, doesn't make sense
-      return false;
-    } else if (
-      this.settings.syncConfigDir &&
-      filePath.startsWith(this.vault.configDir)
-    ) {
-      // Sync configs only if the user explicitly wants to
-      return true;
-    } else {
-      // All other files can be synced
-      return true;
-    }
+    return isSyncablePath(
+      filePath,
+      this.vault.configDir,
+      this.settings.syncConfigDir,
+    );
   }
 }

@@ -1,6 +1,7 @@
 import { Vault, normalizePath } from "obsidian";
+import { LOG_FILE_NAME } from "./constants";
 
-export const LOG_FILE_NAME = "github-sync.log" as const;
+export { LOG_FILE_NAME } from "./constants";
 
 export default class Logger {
   private logFile: string;

@@ -21,6 +21,11 @@ import Logger, { LOG_FILE_NAME } from "./logger";
 import { decodeBase64String, hasTextExtension } from "./utils";
 import GitHubSyncPlugin from "./main";
 import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
+import {
+  automaticConflictAction,
+  isSyncablePath,
+  vaultListingIsEmpty,
+} from "./sync-rules";
 
 interface SyncAction {
   type: "upload" | "download" | "delete_local" | "delete_remote";
@@ -76,12 +81,7 @@ export default class SyncManager {
     const { files, folders } = await this.vault.adapter.list(
       this.vault.getRoot().path,
     );
-    // There are files or folders in the vault dir
-    return (
-      files.length === 0 ||
-      // We filter out the config dir since is always present so it's fine if we find it.
-      folders.filter((f) => f !== this.vault.configDir).length === 0
-    );
+    return vaultListingIsEmpty(files, folders, this.vault.configDir);
   }
 
   /**
@@ -216,11 +216,13 @@ export default class SyncManager {
         }
 
         if (
-          this.settings.syncConfigDir &&
-          targetPath.startsWith(this.vault.configDir) &&
-          targetPath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
+          !isSyncablePath(
+            targetPath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+          )
         ) {
-          await this.logger.info("Skipped config", { targetPath });
+          await this.logger.info("Skipped non-syncable path", { targetPath });
           return;
         }
 
@@ -230,14 +232,6 @@ export default class SyncManager {
           await this.logger.info("Created directory", {
             normalizedPath,
           });
-          return;
-        }
-
-        if (targetPath === `${this.vault.configDir}/${LOG_FILE_NAME}`) {
-          // We don't want to download the log file if the user synced it in the past.
-          // This is necessary because in the past we forgot to ignore the log file
-          // from syncing if the user enabled configs sync.
-          // To avoid downloading it we ignore it if still present in the remote repo.
           return;
         }
 
@@ -265,9 +259,11 @@ export default class SyncManager {
         await this.logger.info("Written file", {
           normalizedPath,
         });
+        const sha =
+          files[normalizedPath]?.sha ?? (await this.calculateSHA(normalizedPath));
         this.metadataStore.data.files[normalizedPath] = {
           path: normalizedPath,
-          sha: files[normalizedPath].sha,
+          sha,
           dirty: false,
           justDownloaded: true,
           lastModified: Date.now(),
@@ -462,28 +458,16 @@ export default class SyncManager {
             return { type: "upload", filePath: resolution.filePath };
           },
         );
-      } else if (this.settings.conflictHandling === "overwriteLocal") {
-        // The user explicitly wants to always overwrite the local file
-        // in case of conflicts so we just download the remote file to solve it
-
-        // It's not necessary to set conflict resolutions as the content the
-        // user expect must be the content of the remote file with no changes.
-        conflictActions = conflictResolutions.map(
-          (resolution: ConflictResolution) => {
-            return { type: "download", filePath: resolution.filePath };
-          },
+      } else {
+        const actionType = automaticConflictAction(
+          this.settings.conflictHandling,
         );
-      } else if (this.settings.conflictHandling === "overwriteRemote") {
-        // The user explicitly wants to always overwrite the remote file
-        // in case of conflicts so we just upload the remote file to solve it.
-
-        // It's not necessary to set conflict resolutions as the content the
-        // user expect must be the content of the local file with no changes.
-        conflictActions = conflictResolutions.map(
-          (resolution: ConflictResolution) => {
-            return { type: "upload", filePath: resolution.filePath };
-          },
-        );
+        if (actionType !== null) {
+          conflictActions = conflicts.map((conflict) => ({
+            type: actionType,
+            filePath: conflict.filePath,
+          }));
+        }
       }
     }
 
@@ -531,9 +515,16 @@ export default class SyncManager {
             // If the file was conflicting we need to read the content from the
             // conflict resolution instead of reading it from file since at this point
             // we still have not updated the local file.
-            const content =
-              resolution?.content ||
-              (await this.vault.adapter.read(normalizedPath));
+            let content: string;
+            if (resolution !== undefined) {
+              content = resolution.content;
+            } else if (hasTextExtension(normalizedPath)) {
+              content = await this.vault.adapter.read(normalizedPath);
+            } else {
+              // Binary files are uploaded as blobs in commitSync. A marker keeps
+              // this tree item in the upload set without reading binary data as text.
+              content = "binaryfile";
+            }
             newTreeFiles[action.filePath] = {
               path: action.filePath,
               mode: "100644",
@@ -775,9 +766,10 @@ export default class SyncManager {
       // Remove all actions that involve the config directory if the user doesn't want to sync it.
       // The manifest file is always synced.
       return actions.filter((action: SyncAction) => {
-        return (
-          !action.filePath.startsWith(this.vault.configDir) ||
-          action.filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
+        return isSyncablePath(
+          action.filePath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
         );
       });
     }
@@ -798,7 +790,10 @@ export default class SyncManager {
       return null;
     }
     const contentBuffer = await this.vault.adapter.readBinary(filePath);
-    const contentBytes = new Uint8Array(contentBuffer);
+    return await this.calculateBlobSHA(new Uint8Array(contentBuffer));
+  }
+
+  private async calculateBlobSHA(contentBytes: Uint8Array): Promise<string> {
     const header = new TextEncoder().encode(`blob ${contentBytes.length}\0`);
     const store = new Uint8Array([...header, ...contentBytes]);
     return await crypto.subtle.digest("SHA-1", store).then((hash) =>
@@ -820,10 +815,28 @@ export default class SyncManager {
     baseTreeSha: string,
     conflictResolutions: ConflictResolution[] = [],
   ) {
+    const metadataSnapshot = JSON.stringify(this.metadataStore.data);
+    try {
+      await this.commitSyncImpl(
+        treeFiles,
+        baseTreeSha,
+        conflictResolutions,
+      );
+    } catch (error) {
+      this.metadataStore.data = JSON.parse(metadataSnapshot);
+      await this.metadataStore.save();
+      throw error;
+    }
+  }
+
+  private async commitSyncImpl(
+    treeFiles: { [key: string]: NewTreeRequestItem },
+    baseTreeSha: string,
+    conflictResolutions: ConflictResolution[],
+  ) {
     // Update local sync time
     const syncTime = Date.now();
     this.metadataStore.data.lastSync = syncTime;
-    this.metadataStore.save();
 
     // We update the last modified timestamp for all files that had resolved conflicts
     // to the the same time as the sync time.
@@ -851,13 +864,16 @@ export default class SyncManager {
     // correctly create it.
     await Promise.all(
       Object.keys(treeFiles)
-        .filter((filePath: string) => treeFiles[filePath].content)
+        .filter((filePath: string) => treeFiles[filePath].content !== undefined)
         .map(async (filePath: string) => {
           // I don't fully trust file extensions as they're not completely reliable
           // to determine the file type, though I feel it's ok to compromise and rely
           // on them if it makes the plugin handle upload better on certain devices.
           if (hasTextExtension(filePath)) {
-            const sha = await this.calculateSHA(filePath);
+            const content = treeFiles[filePath].content!;
+            const sha = await this.calculateBlobSHA(
+              new TextEncoder().encode(content),
+            );
             this.metadataStore.data.files[filePath].sha = sha;
             return;
           }
@@ -922,7 +938,7 @@ export default class SyncManager {
     );
     // Now that the sync is done and we updated the content for conflicting files
     // we can save the latest metadata to disk.
-    this.metadataStore.save();
+    await this.metadataStore.save();
     await this.logger.info("Sync done");
   }
 
@@ -984,8 +1000,13 @@ export default class SyncManager {
         folders.push(...res.folders);
       }
       files.forEach((filePath: string) => {
-        if (filePath === `${this.vault.configDir}/workspace.json`) {
-          // Obsidian recommends not syncing the workspace file
+        if (
+          !isSyncablePath(
+            filePath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+          )
+        ) {
           return;
         }
 
@@ -1035,6 +1056,9 @@ export default class SyncManager {
     }
     // Add them to the metadata store
     files.forEach((filePath: string) => {
+      if (!isSyncablePath(filePath, this.vault.configDir, true)) {
+        return;
+      }
       this.metadataStore.data.files[filePath] = {
         path: filePath,
         sha: null,
@@ -1055,28 +1079,18 @@ export default class SyncManager {
    */
   async removeConfigDirFromMetadata() {
     await this.logger.info("Removing config dir from metadata");
-    // Get all the files in the config dir
-    let files = [];
-    let folders = [this.vault.configDir];
-    while (folders.length > 0) {
-      const folder = folders.pop();
-      if (folder === undefined) {
-        continue;
-      }
-      const res = await this.vault.adapter.list(folder);
-      files.push(...res.files);
-      folders.push(...res.folders);
-    }
-
-    // Remove all them from the metadata store
-    files.forEach((filePath: string) => {
+    Object.keys(this.metadataStore.data.files).forEach((filePath: string) => {
       if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
-        // We don't want to remove the metadata file even if it's in the config dir
         return;
       }
-      delete this.metadataStore.data.files[filePath];
+      if (
+        filePath === this.vault.configDir ||
+        filePath.startsWith(`${this.vault.configDir}/`)
+      ) {
+        delete this.metadataStore.data.files[filePath];
+      }
     });
-    this.metadataStore.save();
+    await this.metadataStore.save();
   }
 
   getFileMetadata(filePath: string): FileMetadata {

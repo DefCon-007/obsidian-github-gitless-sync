@@ -104,6 +104,14 @@ export default class GithubClient {
       );
     }
 
+    if (response.json.truncated) {
+      await this.logger.error("GitHub returned a truncated repository tree");
+      throw new GithubAPIError(
+        409,
+        "Repository contains too many entries for a safe recursive-tree sync",
+      );
+    }
+
     const files = response.json.tree
       .filter((file: GetTreeResponseItem) => file.type === "blob")
       .reduce(
