@@ -2,6 +2,11 @@
 
 Plugin to sync a GitHub repository with an Obsidian vault.
 
+This repository is an independently maintained fork of
+[`silvanocerza/github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync).
+It uses a distinct Obsidian plugin ID so it can be installed and released
+without replacing the upstream community plugin.
+
 I highly recommend not using this plugin with another sync service.
 This might create problems for this plugin when determining what needs to be synced between remote repository and local vault.
 
@@ -20,9 +25,14 @@ These are the main features of the plugin:
 
 ## Installation
 
-The plugin is available as a community plugin, you can easily search for it in Obsidian and install it from there.
+This fork is not published in Obsidian's community plugin directory.
+Install a release with [BRAT](https://github.com/TfTHacker/obsidian42-brat)
+using `DefCon-007/obsidian-github-gitless-sync`, or copy `main.js`,
+`manifest.json`, and `styles.css` from a release into:
 
-![Obsidian community plugin settings](./assets/install_instructions.png)
+```text
+<vault>/.obsidian/plugins/defcon-github-gitless-sync/
+```
 
 ### Issues
 
@@ -130,7 +140,9 @@ Other plugins don't know about that file, so if you sync with others too you ris
 
 Contributions are obviously accepted.
 
-Bug fixes are always welcome, new feature must be discussed first. Open a [discussion](https://github.com/silvanocerza/github-gitless-sync/discussions) and let's talk in that case.
+Bug fixes are always welcome. Please open an
+[issue](https://github.com/DefCon-007/obsidian-github-gitless-sync/issues)
+before starting a substantial feature.
 
 Keep PRs as small as possible, I won't review PRs with hundreds of lines if it's mostly code.
 
