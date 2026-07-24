@@ -1,9 +1,7 @@
 import {
   EventRef,
-  FileSystemAdapter,
   IconName,
   Plugin,
-  Platform,
   WorkspaceLeaf,
   Notice,
   setIcon,
@@ -26,6 +24,7 @@ export default class GitHubSyncPlugin extends Plugin {
   declare settings: GitHubSyncSettings;
   syncManager!: SyncManager;
   logger!: Logger;
+  settingsTab!: GitHubSyncSettingsTab;
 
   statusBarItem: HTMLElement | null = null;
   syncRibbonIcon: HTMLElement | null = null;
@@ -93,13 +92,15 @@ export default class GitHubSyncPlugin extends Plugin {
 
     this.logger = new Logger(this.app.vault, this.settings.enableLogging);
     await this.logger.init();
+    await this.markInterruptedSync();
 
     this.registerView(
       CONFLICTS_RESOLUTION_VIEW_TYPE,
       (leaf) => new ConflictsResolutionView(leaf, this, this.conflicts),
     );
 
-    this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
+    this.settingsTab = new GitHubSyncSettingsTab(this.app, this);
+    this.addSettingTab(this.settingsTab);
 
     this.syncManager = new SyncManager(
       this.app.vault,
@@ -133,6 +134,10 @@ export default class GitHubSyncPlugin extends Plugin {
       if (this.settings.showSyncRibbonButton) {
         this.showSyncRibbonIcon();
       }
+
+      if (this.settings.syncOnStartup && this.isConfigured()) {
+        void this.sync();
+      }
     });
 
     this.addCommand({
@@ -153,12 +158,7 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async sync() {
-    if (
-      this.settings.githubToken === "" ||
-      this.settings.githubOwner === "" ||
-      this.settings.githubRepo === "" ||
-      this.settings.githubBranch === ""
-    ) {
+    if (!this.isConfigured()) {
       new Notice("Sync plugin not configured");
       return;
     }
@@ -169,16 +169,40 @@ export default class GitHubSyncPlugin extends Plugin {
     }
 
     const notice = new Notice("Syncing with GitHub...");
+    const startedAt = new Date().toISOString();
+    const syncId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const wasFirstSync = this.settings.firstSync;
     this.syncInProgress = true;
     this.setSyncState("syncing");
+    this.logger.startSyncRun(syncId);
+    this.settings.lastSync = {
+      id: syncId,
+      status: "syncing",
+      startedAt,
+      message: "Sync in progress",
+    };
+    await this.saveLastSyncReport();
+
     try {
-      if (this.settings.firstSync) {
+      await this.logger.info("Sync started");
+      if (wasFirstSync) {
         await this.syncManager.firstSync();
         this.settings.firstSync = false;
         await this.saveSettings();
       } else {
         await this.syncManager.sync();
       }
+      await this.logger.info("Sync succeeded");
+      this.settings.lastSync = {
+        id: syncId,
+        status: "success",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        message: wasFirstSync
+          ? "First sync completed successfully"
+          : "Sync completed successfully",
+      };
+      await this.saveLastSyncReport();
       this.setSyncState("success");
       new Notice("Sync successful", 5000);
     } catch (error) {
@@ -190,7 +214,16 @@ export default class GitHubSyncPlugin extends Plugin {
       } catch {
         // Logging must never hide the sync failure from the user.
       }
+      this.settings.lastSync = {
+        id: syncId,
+        status: "error",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        message,
+      };
+      await this.saveLastSyncReport();
     } finally {
+      this.logger.endSyncRun();
       this.syncInProgress = false;
       notice.hide();
     }
@@ -314,31 +347,8 @@ export default class GitHubSyncPlugin extends Plugin {
     );
   }
 
-  async openLogs(): Promise<"default-app" | "viewer"> {
+  async openLogs(): Promise<"viewer"> {
     await this.logger.init();
-
-    if (
-      Platform.isDesktopApp &&
-      this.app.vault.adapter instanceof FileSystemAdapter
-    ) {
-      try {
-        const { shell } = await import("electron");
-        const fullPath = this.app.vault.adapter.getFullPath(
-          this.logger.getFilePath(),
-        );
-        const error = await shell.openPath(fullPath);
-        if (error !== "") {
-          throw new Error(error);
-        }
-        return "default-app";
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await this.logger.warn("Failed to open logs in default app", {
-          error: message,
-        });
-      }
-    }
-
     const logs = await this.logger.read();
     new LogViewerModal(this.app, logs).open();
     return "viewer";
@@ -383,6 +393,55 @@ export default class GitHubSyncPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  private isConfigured(): boolean {
+    return (
+      this.settings.githubToken !== "" &&
+      this.settings.githubOwner !== "" &&
+      this.settings.githubRepo !== "" &&
+      this.settings.githubBranch !== ""
+    );
+  }
+
+  private async saveLastSyncReport(): Promise<void> {
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      try {
+        await this.logger.warn("Failed to save last sync status", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } catch {
+        // Status reporting must never interrupt a sync.
+      }
+    } finally {
+      this.settingsTab.refreshSyncActivity();
+    }
+  }
+
+  private async markInterruptedSync(): Promise<void> {
+    const report = this.settings.lastSync;
+    if (report?.status !== "syncing") {
+      return;
+    }
+
+    this.logger.startSyncRun(report.id);
+    try {
+      await this.logger.error("Sync was interrupted before completion");
+    } catch {
+      // A logging failure should not prevent the plugin from loading.
+    } finally {
+      this.logger.endSyncRun();
+    }
+
+    this.settings.lastSync = {
+      ...report,
+      status: "error",
+      completedAt: new Date().toISOString(),
+      message: "Sync was interrupted before completion",
+    };
+    await this.saveSettings();
+  }
+
   // Proxy methods from sync manager to ease handling the interval
   // when settings are changed
   startSyncInterval() {
@@ -403,8 +462,10 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async reset() {
-    this.settings = DEFAULT_SETTINGS;
-    this.saveSettings();
+    Object.assign(this.settings, DEFAULT_SETTINGS);
+    this.logger.enable();
+    await this.saveSettings();
     await this.syncManager.resetMetadata();
+    this.settingsTab.refreshSyncActivity();
   }
 }

@@ -53,7 +53,9 @@ the plugin.
 
 If you find any problem please open an issue with as many details as possible.
 
-Please also provide logs if possible, you can copy them from the settings page. Remember to enable logging first.
+Please also provide logs if possible. Logging is enabled by default, and the
+settings page can display a formatted log or copy its raw content for a bug
+report.
 
 ![Enable logging](./assets/logs_settings.png)
 
@@ -88,6 +90,9 @@ I also suggest creating the token with access only to your sync repo.
 
 You can always sync manually by clicking the sync button in the side ribbon.
 This will always work even if sync on interval is enabled.
+
+Sync on startup is enabled by default and runs once the repository settings
+have been configured.
 
 ![Sync button](./assets/sync_button.png)
 

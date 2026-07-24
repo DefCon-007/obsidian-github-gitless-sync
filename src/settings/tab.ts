@@ -8,9 +8,13 @@ import {
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { copyToClipboard } from "src/utils";
+import { entriesForSync } from "../log-entry";
+import { renderLogEntries } from "../log-viewer";
 
 export default class GitHubSyncSettingsTab extends PluginSettingTab {
   plugin: GitHubSyncPlugin;
+  private syncActivityEl: HTMLElement | null = null;
+  private syncActivityRenderVersion = 0;
 
   constructor(app: App, plugin: GitHubSyncPlugin) {
     super(app, plugin);
@@ -92,6 +96,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).setName("Sync").setHeading();
+
+    this.syncActivityEl = containerEl.createDiv(
+      "github-sync-settings-activity",
+    );
+    void this.renderSyncActivity(this.syncActivityEl);
 
     const syncStrategies = {
       manual: "Manually",
@@ -282,7 +291,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Open logs")
       .setDesc(
-        "Open the complete sync log in your default text editor. On mobile, open it in an Obsidian viewer.",
+        "Open the complete sync log in a formatted, readable viewer.",
       )
       .addButton((button) => {
         button
@@ -290,10 +299,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .setIcon("file-text")
           .onClick(async () => {
             try {
-              const destination = await this.plugin.openLogs();
-              if (destination === "default-app") {
-                new Notice("Opened sync logs", 3000);
-              }
+              await this.plugin.openLogs();
             } catch (error) {
               new Notice(`Failed opening logs: ${error}`, 10000);
             }
@@ -321,6 +327,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .addButton((button) => {
         button.setButtonText("Clean").onClick(async () => {
           await this.plugin.logger.clean();
+          this.refreshSyncActivity();
         });
       });
 
@@ -358,4 +365,92 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
   }
+
+  refreshSyncActivity(): void {
+    if (this.syncActivityEl?.isConnected) {
+      void this.renderSyncActivity(this.syncActivityEl);
+    }
+  }
+
+  private async renderSyncActivity(containerEl: HTMLElement): Promise<void> {
+    const renderVersion = ++this.syncActivityRenderVersion;
+    containerEl.empty();
+    containerEl.createEl("h4", { text: "Last sync" });
+
+    const report = this.plugin.settings.lastSync;
+    if (report === null) {
+      containerEl.createDiv({
+        cls: "github-sync-last-sync-empty",
+        text: "No sync has run yet.",
+      });
+      return;
+    }
+
+    const summaryEl = containerEl.createDiv("github-sync-last-sync-summary");
+    summaryEl.createSpan({
+      cls: `github-sync-last-sync-badge is-${report.status}`,
+      text: getSyncStatusLabel(report.status),
+    });
+    summaryEl.createSpan({
+      cls: "github-sync-last-sync-time",
+      text: formatSyncTime(report.completedAt ?? report.startedAt),
+    });
+    containerEl.createDiv({
+      cls: "github-sync-last-sync-message",
+      text: report.message,
+    });
+
+    const logHeadingEl = containerEl.createDiv(
+      "github-sync-last-sync-log-heading",
+    );
+    logHeadingEl.setText("Logs for this sync");
+    const loadingEl = containerEl.createDiv({
+      cls: "github-sync-log-empty",
+      text: "Loading sync logs…",
+    });
+
+    try {
+      const entries = entriesForSync(
+        await this.plugin.logger.readEntries(),
+        report.id,
+      );
+      if (
+        this.syncActivityEl !== containerEl ||
+        renderVersion !== this.syncActivityRenderVersion
+      ) {
+        return;
+      }
+      loadingEl.remove();
+      renderLogEntries(
+        containerEl,
+        entries,
+        this.plugin.settings.enableLogging
+          ? "No log entries were recorded for this sync."
+          : "Logging was disabled for this sync.",
+      );
+    } catch (error) {
+      if (renderVersion !== this.syncActivityRenderVersion) {
+        return;
+      }
+      loadingEl.setText(`Unable to read sync logs: ${String(error)}`);
+    }
+  }
+}
+
+function getSyncStatusLabel(
+  status: "syncing" | "success" | "error",
+): string {
+  switch (status) {
+    case "syncing":
+      return "In progress";
+    case "success":
+      return "Successful";
+    case "error":
+      return "Failed";
+  }
+}
+
+function formatSyncTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
 }

@@ -4,7 +4,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["main.js", "benchmark_result.json"],
+    ignores: ["main.js", "dist/**", "benchmark_result.json"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

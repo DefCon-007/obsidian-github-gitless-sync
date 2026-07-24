@@ -14,6 +14,15 @@ export interface GitHubSyncSettings {
   showSyncRibbonButton: boolean;
   showConflictsRibbonButton: boolean;
   enableLogging: boolean;
+  lastSync: LastSyncReport | null;
+}
+
+export interface LastSyncReport {
+  id: string;
+  status: "syncing" | "success" | "error";
+  startedAt: string;
+  completedAt?: string;
+  message: string;
 }
 
 export const DEFAULT_SETTINGS: GitHubSyncSettings = {
@@ -24,12 +33,13 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   githubBranch: "main",
   syncStrategy: "manual",
   syncInterval: 1,
-  syncOnStartup: false,
+  syncOnStartup: true,
   syncConfigDir: false,
   conflictHandling: "ask",
   conflictViewMode: "default",
   showStatusBarItem: true,
   showSyncRibbonButton: true,
   showConflictsRibbonButton: true,
-  enableLogging: false,
+  enableLogging: true,
+  lastSync: null,
 };

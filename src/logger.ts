@@ -1,10 +1,12 @@
 import { Vault, normalizePath } from "obsidian";
 import { LOG_FILE_NAME } from "./constants";
+import { LogEntry, parseLogEntries } from "./log-entry";
 
 export { LOG_FILE_NAME } from "./constants";
 
 export default class Logger {
   private logFile: string;
+  private syncId: string | null = null;
 
   constructor(
     private vault: Vault,
@@ -21,10 +23,6 @@ export default class Logger {
     await this.vault.adapter.write(this.logFile, "");
   }
 
-  getFilePath(): string {
-    return this.logFile;
-  }
-
   private async write(
     level: string,
     message: string,
@@ -37,6 +35,7 @@ export default class Logger {
       level,
       message,
       additional_data: data,
+      sync_id: this.syncId ?? undefined,
     };
 
     await this.vault.adapter.append(
@@ -49,8 +48,20 @@ export default class Logger {
     return await this.vault.adapter.read(this.logFile);
   }
 
+  async readEntries(): Promise<LogEntry[]> {
+    return parseLogEntries(await this.read());
+  }
+
   async clean(): Promise<void> {
     return await this.vault.adapter.write(this.logFile, "");
+  }
+
+  startSyncRun(syncId: string): void {
+    this.syncId = syncId;
+  }
+
+  endSyncRun(): void {
+    this.syncId = null;
   }
 
   enable(): void {
