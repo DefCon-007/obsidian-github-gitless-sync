@@ -111,6 +111,8 @@ I also suggest creating the token with access only to your sync repo.
 
 You can always sync manually by clicking the sync button in the side ribbon.
 This will always work even if sync on interval is enabled.
+The plugin settings page also provides a **Sync now** button below the
+last-sync report.
 
 Sync on startup is enabled by default and runs once the repository settings
 have been configured.

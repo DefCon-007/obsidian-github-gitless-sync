@@ -102,6 +102,30 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     );
     void this.renderSyncActivity(this.syncActivityEl);
 
+    new Setting(containerEl)
+      .setName("Sync now")
+      .setDesc("Start a GitHub sync immediately.")
+      .addButton((button) => {
+        button
+          .setButtonText("Sync now")
+          .setIcon("refresh-cw")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("Syncing…");
+            button.setIcon("loader-circle");
+            button.buttonEl.addClass("github-sync-button-is-syncing");
+            try {
+              await this.plugin.sync();
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText("Sync now");
+              button.setIcon("refresh-cw");
+              button.buttonEl.removeClass("github-sync-button-is-syncing");
+            }
+          });
+      });
+
     const syncStrategies = {
       manual: "Manually",
       interval: "On Interval",

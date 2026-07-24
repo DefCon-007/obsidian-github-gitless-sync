@@ -8,7 +8,8 @@
     width: 100%;
 }
 
-.github-sync-ribbon-is-syncing svg {
+.github-sync-ribbon-is-syncing svg,
+.github-sync-button-is-syncing svg {
     animation: github-sync-spin 1s linear infinite;
 }
 
