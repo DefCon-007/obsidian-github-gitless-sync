@@ -49,6 +49,23 @@ The command recreates `dist/defcon-github-gitless-sync/` with only
 your vault's `.obsidian/plugins/` directory, then reload Obsidian and enable
 the plugin.
 
+### Automated GitHub releases
+
+Every push to `main` validates the project, builds the installable plugin, and
+creates a GitHub tag and release using the version in `manifest.json`. The
+release contains the three assets BRAT requires: `main.js`, `manifest.json`,
+and `styles.css`.
+
+Every change must increment the minor version before it reaches `main`:
+
+```sh
+pnpm bump:minor
+```
+
+The release workflow fails instead of replacing an existing release when a
+version has already been published. Do not create or push release tags
+manually.
+
 ### Issues
 
 If you find any problem please open an issue with as many details as possible.
