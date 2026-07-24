@@ -23,6 +23,7 @@ import GitHubSyncPlugin from "./main";
 import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 import {
   automaticConflictAction,
+  findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
   vaultListingIsEmpty,
@@ -438,6 +439,38 @@ export default class SyncManager {
       decodeBase64String(blob.content),
     );
 
+    const staleRemoteMetadataPaths = findStaleRemoteMetadataPaths(
+      remoteMetadata.files,
+      files,
+    ).filter(
+      (filePath) =>
+        filePath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
+    );
+    if (staleRemoteMetadataPaths.length > 0) {
+      await this.logger.warn(
+        "Remote metadata referenced files missing from the GitHub tree",
+        { filePaths: staleRemoteMetadataPaths },
+      );
+
+      await Promise.all(
+        staleRemoteMetadataPaths.map(async (filePath) => {
+          delete remoteMetadata.files[filePath];
+
+          const localMetadata = this.metadataStore.data.files[filePath];
+          if (
+            localMetadata &&
+            !localMetadata.deleted &&
+            !(await this.vault.adapter.exists(filePath))
+          ) {
+            localMetadata.deleted = true;
+            localMetadata.deletedAt = Date.now();
+            localMetadata.dirty = true;
+            localMetadata.justDownloaded = false;
+          }
+        }),
+      );
+    }
+
     const conflicts = await this.findConflicts(remoteMetadata.files);
 
     // We treat every resolved conflict as an upload SyncAction, mainly cause
@@ -482,12 +515,17 @@ export default class SyncManager {
       ...conflictActions,
     ];
 
-    if (actions.length === 0) {
-      // Nothing to sync
+    if (actions.length === 0 && staleRemoteMetadataPaths.length === 0) {
       await this.logger.info("Nothing to sync");
       return;
     }
-    await this.logger.info("Actions to sync", actions);
+    if (actions.length > 0) {
+      await this.logger.info("Actions to sync", actions);
+    } else {
+      await this.logger.info("Repairing stale remote metadata", {
+        filePaths: staleRemoteMetadataPaths,
+      });
+    }
 
     const newTreeFiles: { [key: string]: NewTreeRequestItem } = Object.keys(
       files,
@@ -552,8 +590,14 @@ export default class SyncManager {
       ...actions
         .filter((action) => action.type === "download")
         .map(async (action: SyncAction) => {
+          const remoteFile = files[action.filePath];
+          if (remoteFile === undefined) {
+            throw new Error(
+              `Cannot download "${action.filePath}" because it is missing from the current GitHub tree`,
+            );
+          }
           await this.downloadFile(
-            files[action.filePath],
+            remoteFile,
             remoteMetadata.files[action.filePath].lastModified,
           );
         }),

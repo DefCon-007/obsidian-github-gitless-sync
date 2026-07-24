@@ -16,6 +16,19 @@ export function vaultListingIsEmpty(
   return files.length === 0 && contentFolders.length === 0;
 }
 
+export function findStaleRemoteMetadataPaths(
+  remoteMetadata: Record<string, { deleted?: boolean | null }>,
+  remoteTreeFiles: Record<string, unknown>,
+): string[] {
+  return Object.keys(remoteMetadata).filter((filePath) => {
+    const metadata = remoteMetadata[filePath];
+    return (
+      !metadata.deleted &&
+      !Object.prototype.hasOwnProperty.call(remoteTreeFiles, filePath)
+    );
+  });
+}
+
 export function isSyncablePath(
   filePath: string,
   configDir: string,

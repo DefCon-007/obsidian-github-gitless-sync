@@ -210,7 +210,10 @@ export default class GitHubSyncPlugin extends Plugin {
       this.setSyncState("error");
       new Notice(`Error syncing. ${message}`);
       try {
-        await this.logger.error("Sync failed", { error: message });
+        await this.logger.error("Sync failed", {
+          error: message,
+          stack: error instanceof Error ? error.stack : undefined,
+        });
       } catch {
         // Logging must never hide the sync failure from the user.
       }

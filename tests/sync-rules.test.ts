@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   automaticConflictAction,
+  findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
   vaultListingIsEmpty,
@@ -27,6 +28,22 @@ test("the first-sync safety error explains how to proceed", () => {
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /prevent data loss/u);
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /empty the repository/u);
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /use an empty vault/u);
+});
+
+test("active metadata entries missing from the remote tree are stale", () => {
+  assert.deepEqual(
+    findStaleRemoteMetadataPaths(
+      {
+        "present.md": { deleted: false },
+        "missing.md": { deleted: false },
+        "deleted.md": { deleted: true },
+      },
+      {
+        "present.md": { path: "present.md" },
+      },
+    ),
+    ["missing.md"],
+  );
 });
 
 test("config files are excluded unless config sync is enabled", () => {
