@@ -272,7 +272,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Enable logging")
       .setDesc(
-        "If enabled logs from this plugin will be saved in a file in your config directory.",
+        "Save plugin logs in the vault config directory. The file is automatically limited to the most recent 1 MiB.",
       )
       .addToggle((toggle) => {
         toggle
@@ -403,7 +403,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     const logHeadingEl = containerEl.createDiv(
       "github-sync-last-sync-log-heading",
     );
-    logHeadingEl.setText("Logs for this sync");
+    logHeadingEl.setText("Logs for this sync · newest first");
     const loadingEl = containerEl.createDiv({
       cls: "github-sync-log-empty",
       text: "Loading sync logs…",

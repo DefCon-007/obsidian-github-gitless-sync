@@ -72,7 +72,8 @@ If you find any problem please open an issue with as many details as possible.
 
 Please also provide logs if possible. Logging is enabled by default, and the
 settings page can display a formatted log or copy its raw content for a bug
-report.
+report. Log entries are displayed newest first. The log file is automatically
+trimmed when it exceeds 1 MiB, retaining roughly the newest 768 KiB.
 
 ![Enable logging](./assets/logs_settings.png)
 

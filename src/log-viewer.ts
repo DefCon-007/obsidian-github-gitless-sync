@@ -2,6 +2,7 @@ import { App, Modal } from "obsidian";
 import {
   formatLogData,
   LogEntry,
+  newestLogEntriesFirst,
   parseLogEntries,
 } from "./log-entry";
 
@@ -18,7 +19,7 @@ export default class LogViewerModal extends Modal {
     const entries = parseLogEntries(this.logs);
     this.contentEl.createDiv({
       cls: "github-sync-log-summary",
-      text: `${entries.length} log ${entries.length === 1 ? "entry" : "entries"}`,
+      text: `${entries.length} log ${entries.length === 1 ? "entry" : "entries"} · newest first`,
     });
     renderLogEntries(
       this.contentEl,
@@ -47,7 +48,7 @@ export function renderLogEntries(
     return;
   }
 
-  for (const entry of entries) {
+  for (const entry of newestLogEntriesFirst(entries)) {
     const entryEl = listEl.createDiv("github-sync-log-entry");
     const headerEl = entryEl.createDiv("github-sync-log-entry-header");
     const levelClass = getLevelClass(entry.level);

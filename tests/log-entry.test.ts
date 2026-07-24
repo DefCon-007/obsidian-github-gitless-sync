@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   entriesForSync,
   formatLogData,
+  newestLogEntriesFirst,
   parseLogEntries,
+  trimLogContent,
 } from "../src/log-entry";
 import { DEFAULT_SETTINGS } from "../src/settings/settings";
 
@@ -48,6 +50,31 @@ test("sync logs can be selected by run id", () => {
     entriesForSync(entries, "sync-1").map((entry) => entry.message),
     ["First", "Third"],
   );
+});
+
+test("log entries are presented newest first without mutating the source", () => {
+  const entries = parseLogEntries(
+    [
+      '{"level":"INFO","message":"Oldest"}',
+      '{"level":"INFO","message":"Newest"}',
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    newestLogEntriesFirst(entries).map((entry) => entry.message),
+    ["Newest", "Oldest"],
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.message),
+    ["Oldest", "Newest"],
+  );
+});
+
+test("oversized logs retain only the newest complete entries", () => {
+  const logs = ["old entry", "middle entry", "new entry", ""].join("\n");
+
+  assert.equal(trimLogContent(logs, 20, 15), "new entry\n");
+  assert.equal(trimLogContent(logs, 100, 75), logs);
 });
 
 test("additional log data is formatted as readable JSON", () => {
