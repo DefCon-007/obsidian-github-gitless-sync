@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "release": "pnpm build && node scripts/build-release.mjs",
     "lint": "eslint .",
     "test": "tsx --test tests/**/*.test.ts",
     "version": "node version-bump.mjs",

@@ -34,6 +34,21 @@ using `DefCon-007/obsidian-github-gitless-sync`, or copy `main.js`,
 <vault>/.obsidian/plugins/defcon-github-gitless-sync/
 ```
 
+### Build a local release
+
+Use Node.js 24 and pnpm, then create an installable plugin directory:
+
+```sh
+nvm use
+pnpm install --frozen-lockfile
+pnpm release
+```
+
+The command recreates `dist/defcon-github-gitless-sync/` with only
+`main.js`, `manifest.json`, and `styles.css`. Copy that entire directory into
+your vault's `.obsidian/plugins/` directory, then reload Obsidian and enable
+the plugin.
+
 ### Issues
 
 If you find any problem please open an issue with as many details as possible.
