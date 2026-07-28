@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   automaticConflictAction,
+  determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
@@ -91,4 +92,114 @@ test("automatic conflict policies choose the documented direction", () => {
   assert.equal(automaticConflictAction("overwriteLocal"), "download");
   assert.equal(automaticConflictAction("overwriteRemote"), "upload");
   assert.equal(automaticConflictAction("ask"), null);
+});
+
+test("an unchanged local file is deleted when the remote has a tombstone", () => {
+  assert.equal(
+    determineFileSyncAction(
+      {
+        path: "deleted.md",
+        sha: "same-sha",
+        dirty: true,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: true,
+        deletedAt: 200,
+      },
+      {
+        path: "deleted.md",
+        sha: "same-sha",
+        dirty: false,
+        justDownloaded: false,
+        // A newer timestamp must not resurrect identical content.
+        lastModified: 300,
+        deleted: false,
+        deletedAt: null,
+      },
+      "same-sha",
+    ),
+    "delete_local",
+  );
+});
+
+test("a genuinely newer local edit can supersede a remote deletion", () => {
+  assert.equal(
+    determineFileSyncAction(
+      {
+        path: "edited.md",
+        sha: "old-sha",
+        dirty: true,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: true,
+        deletedAt: 200,
+      },
+      {
+        path: "edited.md",
+        sha: "old-sha",
+        dirty: true,
+        justDownloaded: false,
+        lastModified: 300,
+        deleted: false,
+        deletedAt: null,
+      },
+      "new-sha",
+    ),
+    "upload",
+  );
+});
+
+test("an unchanged remote file is deleted when the local has a tombstone", () => {
+  assert.equal(
+    determineFileSyncAction(
+      {
+        path: "deleted.md",
+        sha: "same-sha",
+        dirty: false,
+        justDownloaded: false,
+        // Clock skew must not resurrect identical remote content.
+        lastModified: 300,
+        deleted: false,
+        deletedAt: null,
+      },
+      {
+        path: "deleted.md",
+        sha: "same-sha",
+        dirty: true,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: true,
+        deletedAt: 200,
+      },
+      null,
+    ),
+    "delete_remote",
+  );
+});
+
+test("a genuinely newer remote edit can supersede a local deletion", () => {
+  assert.equal(
+    determineFileSyncAction(
+      {
+        path: "edited.md",
+        sha: "new-sha",
+        dirty: false,
+        justDownloaded: false,
+        lastModified: 300,
+        deleted: false,
+        deletedAt: null,
+      },
+      {
+        path: "edited.md",
+        sha: "old-sha",
+        dirty: true,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: true,
+        deletedAt: 200,
+      },
+      null,
+    ),
+    "download",
+  );
 });

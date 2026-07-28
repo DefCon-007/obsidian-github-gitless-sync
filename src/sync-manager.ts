@@ -20,9 +20,11 @@ import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
 import { decodeBase64String, hasTextExtension } from "./utils";
 import GitHubSyncPlugin from "./main";
+import DirectoryEnsurer from "./directory-ensurer";
 import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 import {
   automaticConflictAction,
+  determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
   isSyncablePath,
@@ -53,6 +55,7 @@ export default class SyncManager {
   private metadataStore: MetadataStore;
   private client: GithubClient;
   private eventsListener: EventsListener;
+  private directoryEnsurer: DirectoryEnsurer;
   private syncIntervalId: number | null = null;
 
   // Use to track if syncing is in progress, this ideally
@@ -68,6 +71,7 @@ export default class SyncManager {
   ) {
     this.metadataStore = new MetadataStore(this.vault);
     this.client = new GithubClient(this.settings, this.logger);
+    this.directoryEnsurer = new DirectoryEnsurer(this.vault.adapter);
     this.eventsListener = new EventsListener(
       this.vault,
       this.metadataStore,
@@ -235,7 +239,7 @@ export default class SyncManager {
 
         if (entry.directory) {
           const normalizedPath = normalizePath(targetPath);
-          await this.vault.adapter.mkdir(normalizedPath);
+          await this.directoryEnsurer.ensure(normalizedPath);
           await this.logger.info("Created directory", {
             normalizedPath,
           });
@@ -255,10 +259,7 @@ export default class SyncManager {
         const dir = targetPath.split("/").splice(0, -1).join("/");
         if (dir !== "") {
           const normalizedDir = normalizePath(dir);
-          await this.vault.adapter.mkdir(normalizedDir);
-          await this.logger.info("Created directory", {
-            normalizedDir,
-          });
+          await this.directoryEnsurer.ensure(normalizedDir);
         }
 
         const normalizedPath = normalizePath(targetPath);
@@ -723,52 +724,13 @@ export default class SyncManager {
         }
 
         const localSHA = await this.calculateSHA(filePath);
-        if (remoteFile.sha === localSHA) {
-          // If the remote file sha is identical to the actual sha of the local file
-          // there are no actions to take.
-          // We calculate the SHA at the moment instead of using the one stored in the
-          // metadata file cause we update that only when the file is uploaded or downloaded.
-          return;
-        }
-
-        if (remoteFile.deleted && !localFile.deleted) {
-          if ((remoteFile.deletedAt as number) > localFile.lastModified) {
-            actions.push({
-              type: "delete_local",
-              filePath: filePath,
-            });
-            return;
-          } else if (
-            localFile.lastModified > (remoteFile.deletedAt as number)
-          ) {
-            actions.push({ type: "upload", filePath: filePath });
-            return;
-          }
-        }
-
-        if (!remoteFile.deleted && localFile.deleted) {
-          if (remoteFile.lastModified > (localFile.deletedAt as number)) {
-            actions.push({ type: "download", filePath: filePath });
-            return;
-          } else if (
-            (localFile.deletedAt as number) > remoteFile.lastModified
-          ) {
-            actions.push({
-              type: "delete_remote",
-              filePath: filePath,
-            });
-            return;
-          }
-        }
-
-        // For non-deletion cases, if SHAs differ, we just need to check if local changed.
-        // Conflicts are already filtered out so we can make this decision easily
-        if (localSHA !== localFile.sha) {
-          actions.push({ type: "upload", filePath: filePath });
-          return;
-        } else {
-          actions.push({ type: "download", filePath: filePath });
-          return;
+        const actionType = determineFileSyncAction(
+          remoteFile,
+          localFile,
+          localSHA,
+        );
+        if (actionType !== null) {
+          actions.push({ type: actionType, filePath });
         }
       }),
     );
@@ -996,11 +958,9 @@ export default class SyncManager {
     }
     const blob = await this.client.getBlob({ sha: file.sha, retry: true });
     const normalizedPath = normalizePath(file.path);
-    const fileFolder = normalizePath(
-      normalizedPath.split("/").slice(0, -1).join("/"),
-    );
-    if (!(await this.vault.adapter.exists(fileFolder))) {
-      await this.vault.adapter.mkdir(fileFolder);
+    const fileFolder = normalizedPath.split("/").slice(0, -1).join("/");
+    if (fileFolder !== "") {
+      await this.directoryEnsurer.ensure(normalizePath(fileFolder));
     }
     await this.vault.adapter.writeBinary(
       normalizedPath,
