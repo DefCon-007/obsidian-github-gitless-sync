@@ -21,13 +21,20 @@ import Logger, { LOG_FILE_NAME } from "./logger";
 import { decodeBase64String, hasTextExtension } from "./utils";
 import GitHubSyncPlugin from "./main";
 import DirectoryEnsurer from "./directory-ensurer";
-import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
+import {
+  BlobReader,
+  Entry,
+  Uint8ArrayWriter,
+  ZipReader,
+} from "@zip.js/zip.js";
 import {
   automaticConflictAction,
   determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
+  isExtractableArchivePath,
   isSyncablePath,
+  shouldDeleteLocalPathForForcePull,
   vaultListingIsEmpty,
 } from "./sync-rules";
 
@@ -184,6 +191,178 @@ export default class SyncManager {
     }
   }
 
+  async forcePull(protectedPaths: string[]) {
+    if (this.syncing) {
+      throw new Error("A GitHub sync is already in progress");
+    }
+
+    this.syncing = true;
+    try {
+      await this.forcePullImpl(protectedPaths.map(normalizePath));
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  private async forcePullImpl(protectedPaths: string[]) {
+    await this.logger.info("Preparing force pull");
+
+    // Fetch and validate everything before deleting local content.
+    const { files } = await this.client.getRepoContent({ retry: true });
+    const manifestPath = normalizePath(
+      `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
+    );
+    const manifest = files[manifestPath];
+    if (manifest === undefined) {
+      throw new Error(
+        "Cannot force pull because the remote sync metadata is missing",
+      );
+    }
+
+    const [manifestBlob, entries] = await Promise.all([
+      this.client.getBlob({ sha: manifest.sha, retry: true }),
+      this.downloadRepositoryArchiveEntries(),
+    ]);
+
+    let remoteMetadata: Metadata;
+    try {
+      remoteMetadata = JSON.parse(
+        decodeBase64String(manifestBlob.content),
+      ) as Metadata;
+      if (
+        typeof remoteMetadata.lastSync !== "number" ||
+        typeof remoteMetadata.files !== "object" ||
+        remoteMetadata.files === null
+      ) {
+        throw new Error("invalid metadata structure");
+      }
+    } catch (error) {
+      throw new Error(
+        `Cannot force pull because the remote sync metadata is invalid: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const preservedMetadata = Object.fromEntries(
+      Object.entries(this.metadataStore.data.files).filter(([filePath]) =>
+        protectedPaths.some(
+          (protectedPath) =>
+            filePath === protectedPath ||
+            filePath.startsWith(`${protectedPath}/`),
+        ),
+      ),
+    );
+
+    this.eventsListener.pause();
+    try {
+      const removed = await this.wipeLocalVault(protectedPaths);
+      await this.logger.info("Wiped local vault content", removed);
+
+      this.metadataStore.reset();
+      this.metadataStore.data.lastSync = remoteMetadata.lastSync;
+
+      Object.entries(remoteMetadata.files).forEach(([filePath, metadata]) => {
+        if (
+          metadata.deleted &&
+          isSyncablePath(
+            filePath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+          ) &&
+          !protectedPaths.some(
+            (protectedPath) =>
+              filePath === protectedPath ||
+              filePath.startsWith(`${protectedPath}/`),
+          )
+        ) {
+          this.metadataStore.data.files[filePath] = { ...metadata };
+        }
+      });
+
+      Object.assign(this.metadataStore.data.files, preservedMetadata);
+      this.metadataStore.data.files[manifestPath] = {
+        path: manifestPath,
+        sha: manifest.sha,
+        dirty: false,
+        justDownloaded: false,
+        lastModified:
+          remoteMetadata.files[manifestPath]?.lastModified ?? Date.now(),
+        deleted: false,
+        deletedAt: null,
+      };
+
+      await this.extractRepositoryArchive(entries, files, {
+        remoteMetadata: remoteMetadata.files,
+        protectedPaths,
+      });
+    } finally {
+      this.eventsListener.resume();
+    }
+
+    await this.logger.info("Force pull done");
+  }
+
+  private async wipeLocalVault(protectedPaths: string[]): Promise<{
+    removedFiles: number;
+    removedFolders: number;
+  }> {
+    const rootPath = this.vault.getRoot().path;
+    const pendingFolders = [rootPath];
+    const folders: string[] = [];
+    const files: string[] = [];
+
+    while (pendingFolders.length > 0) {
+      const folder = pendingFolders.pop();
+      if (folder === undefined) continue;
+
+      const listing = await this.vault.adapter.list(folder);
+      files.push(...listing.files);
+      folders.push(...listing.folders);
+      pendingFolders.push(...listing.folders);
+    }
+
+    let removedFiles = 0;
+    for (const filePath of files) {
+      if (
+        shouldDeleteLocalPathForForcePull(
+          filePath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+          protectedPaths,
+        )
+      ) {
+        await this.vault.adapter.remove(normalizePath(filePath));
+        removedFiles += 1;
+      }
+    }
+
+    let removedFolders = 0;
+    const deepestFoldersFirst = folders.sort(
+      (left, right) => right.split("/").length - left.split("/").length,
+    );
+    for (const folderPath of deepestFoldersFirst) {
+      if (
+        !shouldDeleteLocalPathForForcePull(
+          folderPath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+          protectedPaths,
+        )
+      ) {
+        continue;
+      }
+
+      const listing = await this.vault.adapter.list(folderPath);
+      if (listing.files.length === 0 && listing.folders.length === 0) {
+        await this.vault.adapter.rmdir(normalizePath(folderPath), false);
+        removedFolders += 1;
+      }
+    }
+
+    return { removedFiles, removedFolders };
+  }
+
   /**
    * Handles first sync with the remote repository.
    * This must be called in case there are no files in the local content dir while
@@ -198,92 +377,8 @@ export default class SyncManager {
   ) {
     await this.logger.info("Starting first sync from remote files");
 
-    // We want to avoid getting throttled by GitHub, so instead of making a request for each
-    // file we download the whole repository as a ZIP file and extract it in the vault.
-    // We exclude config dir files if the user doesn't want to sync those.
-    const zipBuffer = await this.client.downloadRepositoryArchive();
-    const zipBlob = new Blob([zipBuffer]);
-    const reader = new ZipReader(new BlobReader(zipBlob));
-    const entries = await reader.getEntries();
-
-    await this.logger.info("Extracting files from ZIP", {
-      length: entries.length,
-    });
-
-    await Promise.all(
-      entries.map(async (entry: Entry) => {
-        // All repo ZIPs contain a root directory that contains all the content
-        // of that repo, we need to ignore that directory so we strip the first
-        // folder segment from the path
-        const pathParts = entry.filename.split("/");
-        const targetPath =
-          pathParts.length > 1 ? pathParts.slice(1).join("/") : entry.filename;
-
-        if (targetPath === "") {
-          // Must be the root folder, skip it.
-          // This is really important as that would lead us to try and
-          // create the folder "/" and crash Obsidian
-          return;
-        }
-
-        if (
-          !isSyncablePath(
-            targetPath,
-            this.vault.configDir,
-            this.settings.syncConfigDir,
-          )
-        ) {
-          await this.logger.info("Skipped non-syncable path", { targetPath });
-          return;
-        }
-
-        if (entry.directory) {
-          const normalizedPath = normalizePath(targetPath);
-          await this.directoryEnsurer.ensure(normalizedPath);
-          await this.logger.info("Created directory", {
-            normalizedPath,
-          });
-          return;
-        }
-
-        if (targetPath.split("/").last()?.startsWith(".")) {
-          // We must skip hidden files as that creates issues with syncing.
-          // This is fine as users can't edit hidden files in Obsidian anyway.
-          await this.logger.info("Skipping hidden file", targetPath);
-          return;
-        }
-
-        const writer = new Uint8ArrayWriter();
-        await entry.getData!(writer);
-        const data = await writer.getData();
-        const dir = targetPath.split("/").splice(0, -1).join("/");
-        if (dir !== "") {
-          const normalizedDir = normalizePath(dir);
-          await this.directoryEnsurer.ensure(normalizedDir);
-        }
-
-        const normalizedPath = normalizePath(targetPath);
-        await this.vault.adapter.writeBinary(
-          normalizedPath,
-          Uint8Array.from(data).buffer,
-        );
-        await this.logger.info("Written file", {
-          normalizedPath,
-        });
-        const sha =
-          files[normalizedPath]?.sha ?? (await this.calculateSHA(normalizedPath));
-        this.metadataStore.data.files[normalizedPath] = {
-          path: normalizedPath,
-          sha,
-          dirty: false,
-          justDownloaded: true,
-          lastModified: Date.now(),
-        };
-        await this.metadataStore.save();
-      }),
-    );
-
-    await this.logger.info("Extracted zip");
+    const entries = await this.downloadRepositoryArchiveEntries();
+    await this.extractRepositoryArchive(entries, files);
 
     const newTreeFiles = Object.keys(files)
       .map((filePath: string) => ({
@@ -330,6 +425,116 @@ export default class SyncManager {
         }),
     );
     await this.commitSync(newTreeFiles, treeSha);
+  }
+
+  private async downloadRepositoryArchiveEntries(): Promise<Entry[]> {
+    // Download the repository once instead of making a request for every file.
+    const zipBuffer = await this.client.downloadRepositoryArchive({
+      retry: true,
+    });
+    const zipBlob = new Blob([zipBuffer]);
+    const reader = new ZipReader(new BlobReader(zipBlob));
+    return await reader.getEntries();
+  }
+
+  private async extractRepositoryArchive(
+    entries: Entry[],
+    files: { [key: string]: GetTreeResponseItem },
+    {
+      remoteMetadata = {},
+      protectedPaths = [],
+    }: {
+      remoteMetadata?: { [key: string]: FileMetadata };
+      protectedPaths?: string[];
+    } = {},
+  ) {
+    await this.logger.info("Extracting files from ZIP", {
+      length: entries.length,
+    });
+
+    for (const entry of entries) {
+      let targetPath = entry.filename;
+      try {
+        // GitHub ZIPs contain a root directory, which must be stripped.
+        const pathParts = entry.filename.split("/");
+        targetPath =
+          pathParts.length > 1 ? pathParts.slice(1).join("/") : entry.filename;
+
+        if (targetPath === "") {
+          continue;
+        }
+
+        if (
+          !isExtractableArchivePath(
+            targetPath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+            protectedPaths,
+          )
+        ) {
+          await this.logger.info("Skipped non-syncable path", { targetPath });
+          continue;
+        }
+
+        if (entry.directory) {
+          const normalizedPath = normalizePath(targetPath);
+          await this.directoryEnsurer.ensure(normalizedPath);
+          await this.logger.info("Created directory", {
+            normalizedPath,
+          });
+          continue;
+        }
+
+        if (targetPath.split("/").last()?.startsWith(".")) {
+          await this.logger.info("Skipping hidden file", targetPath);
+          continue;
+        }
+
+        const writer = new Uint8ArrayWriter();
+        await entry.getData!(writer);
+        const data = await writer.getData();
+        const dir = targetPath.split("/").splice(0, -1).join("/");
+        if (dir !== "") {
+          await this.directoryEnsurer.ensure(normalizePath(dir));
+        }
+
+        const normalizedPath = normalizePath(targetPath);
+        await this.vault.adapter.writeBinary(
+          normalizedPath,
+          Uint8Array.from(data).buffer,
+        );
+        await this.logger.info("Written file", {
+          normalizedPath,
+        });
+        const sha =
+          files[normalizedPath]?.sha ?? (await this.calculateSHA(normalizedPath));
+        this.metadataStore.data.files[normalizedPath] = {
+          path: normalizedPath,
+          sha,
+          dirty: false,
+          justDownloaded: true,
+          lastModified:
+            remoteMetadata[normalizedPath]?.lastModified ?? Date.now(),
+          deleted: false,
+          deletedAt: null,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        try {
+          await this.logger.error("Failed to extract ZIP entry", {
+            targetPath,
+            directory: entry.directory,
+            error: message,
+          });
+        } catch {
+          // Logging must not replace the extraction error.
+        }
+        throw new Error(`Failed to extract "${targetPath}": ${message}`);
+      }
+    }
+
+    await this.metadataStore.save();
+    await this.logger.info("Extracted zip");
   }
 
   /**

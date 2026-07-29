@@ -5,7 +5,9 @@ import {
   determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
+  isExtractableArchivePath,
   isSyncablePath,
+  shouldDeleteLocalPathForForcePull,
   vaultListingIsEmpty,
 } from "../src/sync-rules";
 
@@ -84,6 +86,101 @@ test("internal metadata stays syncable while volatile config files do not", () =
   );
   assert.equal(
     isSyncablePath(".obsidian/github-sync.log", ".obsidian", true),
+    false,
+  );
+});
+
+test("first-sync archive extraction rebuilds rather than downloads metadata", () => {
+  assert.equal(
+    isExtractableArchivePath(
+      ".obsidian/github-sync-metadata.json",
+      ".obsidian",
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    isExtractableArchivePath("Projects/note.md", ".obsidian", false),
+    true,
+  );
+  assert.equal(
+    isExtractableArchivePath(
+      ".obsidian/plugins/example/data.json",
+      ".obsidian",
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    isExtractableArchivePath(
+      ".obsidian/plugins/defcon-github-gitless-sync/main.js",
+      ".obsidian",
+      true,
+      [".obsidian/plugins/defcon-github-gitless-sync"],
+    ),
+    false,
+  );
+});
+
+test("force pull deletes synced content but preserves runtime state", () => {
+  const protectedPaths = [
+    ".obsidian/plugins/defcon-github-gitless-sync",
+    ".obsidian/github-sync-metadata.json",
+    ".obsidian/github-sync.log",
+  ];
+
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      "Projects/local-only.md",
+      ".obsidian",
+      false,
+      protectedPaths,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      ".obsidian/themes/local/theme.css",
+      ".obsidian",
+      false,
+      protectedPaths,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      ".obsidian/themes/local/theme.css",
+      ".obsidian",
+      true,
+      protectedPaths,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      ".obsidian/plugins/defcon-github-gitless-sync/data.json",
+      ".obsidian",
+      true,
+      protectedPaths,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      ".obsidian",
+      ".obsidian",
+      true,
+      protectedPaths,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldDeleteLocalPathForForcePull(
+      ".obsidian/workspace-mobile.json",
+      ".obsidian",
+      true,
+      protectedPaths,
+    ),
     false,
   );
 });

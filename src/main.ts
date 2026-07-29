@@ -4,6 +4,7 @@ import {
   Plugin,
   WorkspaceLeaf,
   Notice,
+  normalizePath,
   setIcon,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
@@ -15,6 +16,7 @@ import {
   CONFLICTS_RESOLUTION_VIEW_TYPE,
 } from "./views/conflicts-resolution/view";
 import LogViewerModal from "./log-viewer";
+import { LOG_FILE_NAME, MANIFEST_FILE_NAME } from "./constants";
 import {
   SyncState,
   syncPresentation,
@@ -158,6 +160,14 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async sync() {
+    await this.runSync(false);
+  }
+
+  async forcePull() {
+    await this.runSync(true);
+  }
+
+  private async runSync(forcePull: boolean) {
     if (!this.isConfigured()) {
       new Notice("Sync plugin not configured");
       return;
@@ -168,10 +178,12 @@ export default class GitHubSyncPlugin extends Plugin {
       return;
     }
 
-    const notice = new Notice("Syncing with GitHub...");
+    const notice = new Notice(
+      forcePull ? "Force pulling from GitHub..." : "Syncing with GitHub...",
+    );
     const startedAt = new Date().toISOString();
     const syncId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const wasFirstSync = this.settings.firstSync;
+    const wasFirstSync = !forcePull && this.settings.firstSync;
     this.syncInProgress = true;
     this.setSyncState("syncing");
     this.logger.startSyncRun(syncId);
@@ -179,32 +191,40 @@ export default class GitHubSyncPlugin extends Plugin {
       id: syncId,
       status: "syncing",
       startedAt,
-      message: "Sync in progress",
+      message: forcePull ? "Force pull in progress" : "Sync in progress",
     };
     await this.saveLastSyncReport();
 
     try {
-      await this.logger.info("Sync started");
-      if (wasFirstSync) {
+      await this.logger.info(forcePull ? "Force pull started" : "Sync started");
+      if (forcePull) {
+        await this.syncManager.forcePull(this.forcePullProtectedPaths());
+        this.settings.firstSync = false;
+        await this.saveSettings();
+      } else if (wasFirstSync) {
         await this.syncManager.firstSync();
         this.settings.firstSync = false;
         await this.saveSettings();
       } else {
         await this.syncManager.sync();
       }
-      await this.logger.info("Sync succeeded");
+      await this.logger.info(
+        forcePull ? "Force pull succeeded" : "Sync succeeded",
+      );
       this.settings.lastSync = {
         id: syncId,
         status: "success",
         startedAt,
         completedAt: new Date().toISOString(),
-        message: wasFirstSync
-          ? "First sync completed successfully"
-          : "Sync completed successfully",
+        message: forcePull
+          ? "Force pull completed successfully"
+          : wasFirstSync
+            ? "First sync completed successfully"
+            : "Sync completed successfully",
       };
       await this.saveLastSyncReport();
       this.setSyncState("success");
-      new Notice("Sync successful", 5000);
+      new Notice(forcePull ? "Force pull successful" : "Sync successful", 5000);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.setSyncState("error");
@@ -230,6 +250,15 @@ export default class GitHubSyncPlugin extends Plugin {
       this.syncInProgress = false;
       notice.hide();
     }
+  }
+
+  private forcePullProtectedPaths(): string[] {
+    const configDir = this.app.vault.configDir;
+    return [
+      normalizePath(`${configDir}/plugins/${this.manifest.id}`),
+      normalizePath(`${configDir}/${MANIFEST_FILE_NAME}`),
+      normalizePath(`${configDir}/${LOG_FILE_NAME}`),
+    ];
   }
 
   async onunload() {

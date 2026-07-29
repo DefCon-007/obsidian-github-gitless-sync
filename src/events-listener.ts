@@ -9,6 +9,8 @@ import { isSyncablePath } from "./sync-rules";
  * Tracks changes to local sync directory and updates files metadata.
  */
 export default class EventsListener {
+  private paused = false;
+
   constructor(
     private vault: Vault,
     private metadataStore: MetadataStore,
@@ -26,7 +28,16 @@ export default class EventsListener {
     plugin.registerEvent(this.vault.on("rename", this.onRename.bind(this)));
   }
 
+  pause() {
+    this.paused = true;
+  }
+
+  resume() {
+    this.paused = false;
+  }
+
   private async onCreate(file: TAbstractFile) {
+    if (this.paused) return;
     await this.logger.info("Received create event", file.path);
     if (!this.isSyncable(file.path)) {
       // The file has not been created in directory that we're syncing with GitHub
@@ -61,6 +72,7 @@ export default class EventsListener {
   }
 
   private async onDelete(file: TAbstractFile | string) {
+    if (this.paused) return;
     const filePath = file instanceof TAbstractFile ? file.path : file;
     await this.logger.info("Received delete event", filePath);
     if (file instanceof TFolder) {
@@ -88,6 +100,7 @@ export default class EventsListener {
   }
 
   private async onModify(file: TAbstractFile) {
+    if (this.paused) return;
     await this.logger.info("Received modify event", file.path);
     if (!this.isSyncable(file.path)) {
       // The file has not been create in directory that we're syncing with GitHub
@@ -126,6 +139,7 @@ export default class EventsListener {
   }
 
   private async onRename(file: TAbstractFile, oldPath: string) {
+    if (this.paused) return;
     await this.logger.info("Received rename event", file.path);
     if (file instanceof TFolder) {
       // Skip folders

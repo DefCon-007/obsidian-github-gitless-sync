@@ -111,6 +111,50 @@ export function isSyncablePath(
   return true;
 }
 
+export function isExtractableArchivePath(
+  filePath: string,
+  configDir: string,
+  syncConfigDir: boolean,
+  protectedPaths: string[] = [],
+): boolean {
+  if (filePath === `${configDir}/${MANIFEST_FILE_NAME}`) {
+    // The local metadata store is rebuilt in memory while extracting the
+    // archive and saved once extraction completes. Writing the remote copy
+    // here would race those updates and briefly replace local sync state.
+    return false;
+  }
+
+  if (
+    protectedPaths.some(
+      (protectedPath) =>
+        filePath === protectedPath ||
+        filePath.startsWith(`${protectedPath}/`),
+    )
+  ) {
+    return false;
+  }
+
+  return isSyncablePath(filePath, configDir, syncConfigDir);
+}
+
+export function shouldDeleteLocalPathForForcePull(
+  filePath: string,
+  configDir: string,
+  syncConfigDir: boolean,
+  protectedPaths: string[],
+): boolean {
+  if (!isSyncablePath(filePath, configDir, syncConfigDir)) {
+    return false;
+  }
+
+  return !protectedPaths.some(
+    (protectedPath) =>
+      filePath === protectedPath ||
+      filePath.startsWith(`${protectedPath}/`) ||
+      protectedPath.startsWith(`${filePath}/`),
+  );
+}
+
 export function automaticConflictAction(
   handling: GitHubSyncSettings["conflictHandling"],
 ): AutomaticConflictAction {
