@@ -139,49 +139,27 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onClick(() => {
             const modal = new Modal(this.plugin.app);
             modal.setTitle("Force pull from GitHub?");
-            modal.contentEl.createEl("p", {
-              text:
-                "This permanently deletes all local synced content and replaces it with the GitHub repository. " +
-                "Local changes will not be uploaded and cannot be recovered by this plugin.",
-            });
-            modal.contentEl.createEl("p", {
-              text:
-                "The running plugin, its settings, sync metadata, logs, and Obsidian workspace files are preserved. " +
-                "The remote repository is never modified.",
-            });
-            modal.contentEl.createEl("p", {
-              text: 'Type "FORCE PULL" to confirm.',
-            });
-
-            let confirmButtonEl: HTMLButtonElement;
-            new Setting(modal.contentEl)
-              .setName("Confirmation")
-              .addText((text) => {
-                text.setPlaceholder("FORCE PULL").onChange((value) => {
-                  confirmButtonEl.disabled = value !== "FORCE PULL";
-                });
-                window.setTimeout(() => text.inputEl.focus());
-              });
+            modal.setContent(
+              "This permanently deletes local synced content and replaces it with the remote repository.",
+            );
 
             new Setting(modal.contentEl)
+              .addButton((btn) =>
+                btn.setButtonText("Cancel").onClick(() => {
+                  modal.close();
+                }),
+              )
               .addButton((btn) => {
                 btn
-                  .setButtonText("Delete local files and pull")
+                  .setButtonText("Confirm and pull")
                   .setWarning()
-                  .setDisabled(true)
                   .onClick(async () => {
                     btn.setDisabled(true);
                     btn.setButtonText("Force pulling…");
                     await this.plugin.forcePull();
                     modal.close();
                   });
-                confirmButtonEl = btn.buttonEl;
-              })
-              .addButton((btn) =>
-                btn.setButtonText("Cancel").onClick(() => {
-                  modal.close();
-                }),
-              );
+              });
 
             modal.open();
           });
