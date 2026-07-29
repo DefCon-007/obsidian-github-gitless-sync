@@ -14,6 +14,13 @@ export const FIRST_SYNC_BOTH_SIDES_ERROR =
   "First sync cannot start because both this vault and the GitHub repository already contain files. " +
   "To prevent data loss, empty the repository to upload this vault, or use an empty vault to download the repository.";
 
+export function needsFirstSync(
+  firstSyncSetting: boolean,
+  localLastSync: number,
+): boolean {
+  return firstSyncSetting && localLastSync <= 0;
+}
+
 export function vaultListingIsEmpty(
   files: string[],
   folders: string[],

@@ -260,7 +260,6 @@ export default class SyncManager {
       await this.logger.info("Wiped local vault content", removed);
 
       this.metadataStore.reset();
-      this.metadataStore.data.lastSync = remoteMetadata.lastSync;
 
       Object.entries(remoteMetadata.files).forEach(([filePath, metadata]) => {
         if (
@@ -296,6 +295,8 @@ export default class SyncManager {
         remoteMetadata: remoteMetadata.files,
         protectedPaths,
       });
+      this.metadataStore.data.lastSync = Date.now();
+      await this.metadataStore.save();
     } finally {
       this.eventsListener.resume();
     }
@@ -1306,6 +1307,10 @@ export default class SyncManager {
 
   getFileMetadata(filePath: string): FileMetadata {
     return this.metadataStore.data.files[filePath];
+  }
+
+  getLastSyncTime(): number {
+    return this.metadataStore.data.lastSync;
   }
 
   startEventsListener(plugin: GitHubSyncPlugin) {

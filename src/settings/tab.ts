@@ -156,8 +156,13 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                   .onClick(async () => {
                     btn.setDisabled(true);
                     btn.setButtonText("Force pulling…");
-                    await this.plugin.forcePull();
-                    modal.close();
+                    const succeeded = await this.plugin.forcePull();
+                    if (succeeded) {
+                      modal.close();
+                    } else {
+                      btn.setDisabled(false);
+                      btn.setButtonText("Confirm and pull");
+                    }
                   });
               });
 

@@ -7,6 +7,7 @@ import {
   FIRST_SYNC_BOTH_SIDES_ERROR,
   isExtractableArchivePath,
   isSyncablePath,
+  needsFirstSync,
   shouldDeleteLocalPathForForcePull,
   vaultListingIsEmpty,
 } from "../src/sync-rules";
@@ -31,6 +32,12 @@ test("the first-sync safety error explains how to proceed", () => {
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /prevent data loss/u);
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /empty the repository/u);
   assert.match(FIRST_SYNC_BOTH_SIDES_ERROR, /use an empty vault/u);
+});
+
+test("completed local metadata overrides a stale first-sync setting", () => {
+  assert.equal(needsFirstSync(true, 0), true);
+  assert.equal(needsFirstSync(true, 1234), false);
+  assert.equal(needsFirstSync(false, 0), false);
 });
 
 test("active metadata entries missing from the remote tree are stale", () => {

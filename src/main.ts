@@ -17,6 +17,7 @@ import {
 } from "./views/conflicts-resolution/view";
 import LogViewerModal from "./log-viewer";
 import { LOG_FILE_NAME, MANIFEST_FILE_NAME } from "./constants";
+import { needsFirstSync } from "./sync-rules";
 import {
   SyncState,
   syncPresentation,
@@ -160,22 +161,22 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async sync() {
-    await this.runSync(false);
+    return await this.runSync(false);
   }
 
   async forcePull() {
-    await this.runSync(true);
+    return await this.runSync(true);
   }
 
   private async runSync(forcePull: boolean) {
     if (!this.isConfigured()) {
       new Notice("Sync plugin not configured");
-      return;
+      return false;
     }
 
     if (this.syncInProgress) {
       new Notice("A GitHub sync is already in progress", 3000);
-      return;
+      return false;
     }
 
     const notice = new Notice(
@@ -183,7 +184,12 @@ export default class GitHubSyncPlugin extends Plugin {
     );
     const startedAt = new Date().toISOString();
     const syncId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const wasFirstSync = !forcePull && this.settings.firstSync;
+    const wasFirstSync =
+      !forcePull &&
+      needsFirstSync(
+        this.settings.firstSync,
+        this.syncManager.getLastSyncTime(),
+      );
     this.syncInProgress = true;
     this.setSyncState("syncing");
     this.logger.startSyncRun(syncId);
@@ -197,6 +203,13 @@ export default class GitHubSyncPlugin extends Plugin {
 
     try {
       await this.logger.info(forcePull ? "Force pull started" : "Sync started");
+      if (!forcePull && this.settings.firstSync && !wasFirstSync) {
+        this.settings.firstSync = false;
+        await this.saveSettings();
+        await this.logger.info(
+          "Recovered stale first-sync setting from local sync metadata",
+        );
+      }
       if (forcePull) {
         await this.syncManager.forcePull(this.forcePullProtectedPaths());
         this.settings.firstSync = false;
@@ -225,6 +238,7 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.saveLastSyncReport();
       this.setSyncState("success");
       new Notice(forcePull ? "Force pull successful" : "Sync successful", 5000);
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.setSyncState("error");
@@ -245,6 +259,7 @@ export default class GitHubSyncPlugin extends Plugin {
         message,
       };
       await this.saveLastSyncReport();
+      return false;
     } finally {
       this.logger.endSyncRun();
       this.syncInProgress = false;
@@ -479,7 +494,9 @@ export default class GitHubSyncPlugin extends Plugin {
   startSyncInterval() {
     const intervalID = this.syncManager.startSyncInterval(
       this.settings.syncInterval,
-      this.sync.bind(this),
+      async () => {
+        await this.sync();
+      },
     );
     this.registerInterval(intervalID);
   }

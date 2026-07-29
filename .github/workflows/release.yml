@@ -33,22 +33,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Bump minor release version
+        id: release-version
+        run: |
+          pnpm run bump:minor
+          version="$(node -p "require('./manifest.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Validate and package plugin
         run: |
           pnpm lint
           pnpm test
           pnpm release
-
-      - name: Read release version
-        id: release-version
-        shell: bash
-        run: |
-          version="$(node -p "require('./dist/defcon-github-gitless-sync/manifest.json').version")"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Manifest version '$version' is not a stable semantic version"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Ensure version has not been released
         env:
@@ -56,11 +52,11 @@ jobs:
           VERSION: ${{ steps.release-version.outputs.version }}
         run: |
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "::error::Release $VERSION already exists. Increment the minor version before pushing to main."
+            echo "::error::Release $VERSION already exists."
             exit 1
           fi
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-            echo "::error::Tag $VERSION already exists. Increment the minor version before pushing to main."
+            echo "::error::Tag $VERSION already exists."
             exit 1
           fi
 
@@ -72,13 +68,25 @@ jobs:
             dist/defcon-github-gitless-sync/manifest.json
             dist/defcon-github-gitless-sync/styles.css
 
+      - name: Commit release version
+        id: release-commit
+        env:
+          VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json manifest.json manifest-beta.json versions.json
+          git commit -m "Bump plugin version to $VERSION"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.release-version.outputs.version }}
         run: |
           gh release create "$VERSION" \
-            --target "$GITHUB_SHA" \
+            --target "${{ steps.release-commit.outputs.sha }}" \
             --title "$VERSION" \
             --generate-notes \
             --fail-on-no-commits \
