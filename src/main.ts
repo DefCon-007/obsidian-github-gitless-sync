@@ -16,8 +16,11 @@ import {
   CONFLICTS_RESOLUTION_VIEW_TYPE,
 } from "./views/conflicts-resolution/view";
 import LogViewerModal from "./log-viewer";
+import FirstSyncConflictModal, {
+  FirstSyncConflictChoice,
+} from "./views/first-sync-conflict-modal";
 import { LOG_FILE_NAME, MANIFEST_FILE_NAME } from "./constants";
-import { needsFirstSync } from "./sync-rules";
+import { FIRST_SYNC_BOTH_SIDES_ERROR, needsFirstSync } from "./sync-rules";
 import {
   SyncState,
   syncPresentation,
@@ -179,6 +182,11 @@ export default class GitHubSyncPlugin extends Plugin {
       return false;
     }
 
+    // Set when the first sync is refused because both the local vault and the
+    // remote repository contain files. We can't resolve it mid-sync (a force
+    // pull needs syncInProgress to be clear), so we handle it after cleanup.
+    let firstSyncConflict = false;
+
     const notice = new Notice(
       forcePull ? "Force pulling from GitHub..." : "Syncing with GitHub...",
     );
@@ -242,7 +250,10 @@ export default class GitHubSyncPlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.setSyncState("error");
-      new Notice(`Error syncing. ${message}`);
+      firstSyncConflict = !forcePull && message === FIRST_SYNC_BOTH_SIDES_ERROR;
+      if (!firstSyncConflict) {
+        new Notice(`Error syncing. ${message}`);
+      }
       try {
         await this.logger.error("Sync failed", {
           error: message,
@@ -259,12 +270,59 @@ export default class GitHubSyncPlugin extends Plugin {
         message,
       };
       await this.saveLastSyncReport();
-      return false;
     } finally {
       this.logger.endSyncRun();
       this.syncInProgress = false;
       notice.hide();
     }
+
+    // Reached only on failure (the success path returns true above). When the
+    // first sync hit the both-sides conflict, offer recovery options instead of
+    // leaving the user with a raw error.
+    if (firstSyncConflict) {
+      await this.handleFirstSyncConflict();
+    }
+    return false;
+  }
+
+  /**
+   * Offer recovery options when the first sync is refused because both the
+   * local vault and the remote repository already contain files.
+   */
+  private async handleFirstSyncConflict(): Promise<void> {
+    const choice = await new Promise<FirstSyncConflictChoice>((resolve) => {
+      new FirstSyncConflictModal(this.app, resolve).open();
+    });
+
+    if (choice === "forcePull") {
+      await this.forcePull();
+    } else if (choice === "reconfigureRemote") {
+      this.openSettings();
+    }
+  }
+
+  /**
+   * Opens this plugin's settings tab so the user can point the plugin at a
+   * different or new empty repository. The methods used here are provided by
+   * Obsidian at runtime but are not part of its public type definitions.
+   */
+  private openSettings(): void {
+    const setting = (
+      this.app as unknown as {
+        setting?: {
+          open?: () => void;
+          openTabById?: (id: string) => void;
+        };
+      }
+    ).setting;
+
+    if (!setting?.open || !setting.openTabById) {
+      new Notice("Open the plugin settings to change the repository.", 7000);
+      return;
+    }
+
+    setting.open();
+    setting.openTabById(this.manifest.id);
   }
 
   private forcePullProtectedPaths(): string[] {

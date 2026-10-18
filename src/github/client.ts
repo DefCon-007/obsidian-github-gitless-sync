@@ -1,7 +1,8 @@
 import { requestUrl } from "obsidian";
 import Logger from "src/logger";
 import { GitHubSyncSettings } from "src/settings/settings";
-import { retryUntil } from "src/utils";
+import { retryUntil } from "src/async-utils";
+import { isRetryableGithubStatus } from "./retry";
 
 export type RepoContent = {
   files: { [key: string]: GetTreeResponseItem };
@@ -81,18 +82,23 @@ export default class GithubClient {
    * @returns Array of files in the directory in the remote repo
    */
   async getRepoContent({
+    ref = this.settings.githubBranch,
     retry = false,
     maxRetries = 5,
+  }: {
+    ref?: string;
+    retry?: boolean;
+    maxRetries?: number;
   } = {}): Promise<RepoContent> {
     const response = await retryUntil(
       async () => {
         return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees/${this.settings.githubBranch}?recursive=1`,
+          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
           headers: this.headers(),
           throw: false,
         });
       },
-      (res) => res.status !== 422, // Retry condition: only retry on 422 status
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0, // Use 0 retries if retry is false
     );
 
@@ -112,15 +118,12 @@ export default class GithubClient {
       );
     }
 
-    const files = response.json.tree
+    const files: { [key: string]: GetTreeResponseItem } = {};
+    response.json.tree
       .filter((file: GetTreeResponseItem) => file.type === "blob")
-      .reduce(
-        (
-          acc: { [key: string]: GetTreeResponseItem },
-          file: GetTreeResponseItem,
-        ) => ({ ...acc, [file.path]: file }),
-        {},
-      );
+      .forEach((file: GetTreeResponseItem) => {
+        files[file.path] = file;
+      });
     return { files, sha: response.json.sha };
   }
 
@@ -151,7 +154,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -202,7 +205,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -232,7 +235,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -274,9 +277,19 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
+
+    if (response.status === 422) {
+      await this.logger.warn(
+        "GitHub branch changed before this sync could be committed",
+      );
+      throw new GithubAPIError(
+        response.status,
+        "The GitHub branch changed during sync. No remote files were overwritten; run sync again.",
+      );
+    }
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to update branch head sha", response);
@@ -317,7 +330,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -358,7 +371,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -408,7 +421,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -429,19 +442,24 @@ export default class GithubClient {
    * @returns The archive contents as an ArrayBuffer
    */
   async downloadRepositoryArchive({
+    ref = this.settings.githubBranch,
     retry = false,
     maxRetries = 5,
+  }: {
+    ref?: string;
+    retry?: boolean;
+    maxRetries?: number;
   } = {}): Promise<ArrayBuffer> {
     const response = await retryUntil(
       async () => {
         return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/zipball/${this.settings.githubBranch}`,
+          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/zipball/${encodeURIComponent(ref)}`,
           headers: this.headers(),
           method: "GET",
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetryableGithubStatus(res.status),
       retry ? maxRetries : 0,
     );
 

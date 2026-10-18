@@ -95,6 +95,14 @@ test("internal metadata stays syncable while volatile config files do not", () =
     isSyncablePath(".obsidian/github-sync.log", ".obsidian", true),
     false,
   );
+  assert.equal(
+    isSyncablePath(
+      ".obsidian/github-sync-force-pull-staging/note.md",
+      ".obsidian",
+      true,
+    ),
+    false,
+  );
 });
 
 test("first-sync archive extraction rebuilds rather than downloads metadata", () => {
@@ -196,6 +204,33 @@ test("automatic conflict policies choose the documented direction", () => {
   assert.equal(automaticConflictAction("overwriteLocal"), "download");
   assert.equal(automaticConflictAction("overwriteRemote"), "upload");
   assert.equal(automaticConflictAction("ask"), null);
+});
+
+test("a missing local file is restored instead of uploaded", () => {
+  assert.equal(
+    determineFileSyncAction(
+      {
+        path: "missed-delete.md",
+        sha: "remote-sha",
+        dirty: false,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: false,
+        deletedAt: null,
+      },
+      {
+        path: "missed-delete.md",
+        sha: "remote-sha",
+        dirty: false,
+        justDownloaded: false,
+        lastModified: 100,
+        deleted: false,
+        deletedAt: null,
+      },
+      null,
+    ),
+    "download",
+  );
 });
 
 test("an unchanged local file is deleted when the remote has a tombstone", () => {

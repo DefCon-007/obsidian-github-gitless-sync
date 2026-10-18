@@ -19,6 +19,7 @@ import EventsListener from "./events-listener";
 import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
 import { decodeBase64String, hasTextExtension } from "./utils";
+import { mapWithConcurrency } from "./async-utils";
 import GitHubSyncPlugin from "./main";
 import DirectoryEnsurer from "./directory-ensurer";
 import {
@@ -37,11 +38,15 @@ import {
   shouldDeleteLocalPathForForcePull,
   vaultListingIsEmpty,
 } from "./sync-rules";
+import { FORCE_PULL_STAGING_DIR_NAME } from "./constants";
+import { calculateGitBlobSha } from "./git-blob";
 
 interface SyncAction {
   type: "upload" | "download" | "delete_local" | "delete_remote";
   filePath: string;
 }
+
+const MOBILE_IO_CONCURRENCY = 3;
 
 export interface ConflictFile {
   filePath: string;
@@ -126,8 +131,13 @@ export default class SyncManager {
       [key: string]: GetTreeResponseItem;
     } = {};
     let treeSha: string = "";
+    let branchHeadSha: string = "";
     try {
-      res = await this.client.getRepoContent();
+      branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
+      res = await this.client.getRepoContent({
+        ref: branchHeadSha,
+        retry: true,
+      });
       files = res.files;
       treeSha = res.sha;
     } catch (err) {
@@ -164,7 +174,11 @@ export default class SyncManager {
       });
       // Now get the repo content again cause we know for sure it will return a
       // valid sha that we can use to create the first sync commit.
-      res = await this.client.getRepoContent({ retry: true });
+      branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
+      res = await this.client.getRepoContent({
+        ref: branchHeadSha,
+        retry: true,
+      });
       files = res.files;
       treeSha = res.sha;
     }
@@ -181,13 +195,13 @@ export default class SyncManager {
       // Remote has no files and no manifest, let's just upload whatever we have locally.
       // This is fine even if the vault is empty.
       // The most important thing at this point is that the remote manifest is created.
-      await this.firstSyncFromLocal(files, treeSha);
+      await this.firstSyncFromLocal(files, treeSha, branchHeadSha);
     } else {
       // Local has no files and there's no manifest in the remote repo.
       // Let's download whatever we have in the remote repo.
       // This is fine even if the remote repo is empty.
       // In this case too the important step is that the remote manifest is created.
-      await this.firstSyncFromRemote(files, treeSha);
+      await this.firstSyncFromRemote(files, treeSha, branchHeadSha);
     }
   }
 
@@ -208,7 +222,11 @@ export default class SyncManager {
     await this.logger.info("Preparing force pull");
 
     // Fetch and validate everything before deleting local content.
-    const { files } = await this.client.getRepoContent({ retry: true });
+    const branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
+    const { files } = await this.client.getRepoContent({
+      ref: branchHeadSha,
+      retry: true,
+    });
     const manifestPath = normalizePath(
       `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
     );
@@ -221,7 +239,7 @@ export default class SyncManager {
 
     const [manifestBlob, entries] = await Promise.all([
       this.client.getBlob({ sha: manifest.sha, retry: true }),
-      this.downloadRepositoryArchiveEntries(),
+      this.downloadRepositoryArchiveEntries(branchHeadSha),
     ]);
 
     let remoteMetadata: Metadata;
@@ -254,9 +272,23 @@ export default class SyncManager {
       ),
     );
 
+    const stagingPath = normalizePath(
+      `${this.vault.configDir}/${FORCE_PULL_STAGING_DIR_NAME}`,
+    );
+    const wipeProtectedPaths = [...protectedPaths, stagingPath];
+    let localWipeStarted = false;
+
     this.eventsListener.pause();
     try {
-      const removed = await this.wipeLocalVault(protectedPaths);
+      await this.stageRepositoryArchive(
+        entries,
+        files,
+        protectedPaths,
+        stagingPath,
+      );
+
+      localWipeStarted = true;
+      const removed = await this.wipeLocalVault(wipeProtectedPaths);
       await this.logger.info("Wiped local vault content", removed);
 
       this.metadataStore.reset();
@@ -291,12 +323,26 @@ export default class SyncManager {
         deletedAt: null,
       };
 
-      await this.extractRepositoryArchive(entries, files, {
-        remoteMetadata: remoteMetadata.files,
-        protectedPaths,
-      });
+      await this.installStagedArchive(
+        stagingPath,
+        files,
+        remoteMetadata.files,
+      );
       this.metadataStore.data.lastSync = Date.now();
       await this.metadataStore.save();
+    } catch (error) {
+      if (!localWipeStarted) {
+        await this.removeStagingDirectory(stagingPath);
+      } else {
+        await this.logger.error(
+          "Force pull was interrupted after the local wipe; staged files were retained for recovery",
+          {
+            stagingPath,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+      throw error;
     } finally {
       this.eventsListener.resume();
     }
@@ -375,33 +421,24 @@ export default class SyncManager {
   private async firstSyncFromRemote(
     files: { [key: string]: GetTreeResponseItem },
     treeSha: string,
+    branchHeadSha: string,
   ) {
     await this.logger.info("Starting first sync from remote files");
 
-    const entries = await this.downloadRepositoryArchiveEntries();
-    await this.extractRepositoryArchive(entries, files);
+    const entries = await this.downloadRepositoryArchiveEntries(branchHeadSha);
+    this.eventsListener.pause();
+    try {
+      await this.extractRepositoryArchive(entries, files);
 
-    const newTreeFiles = Object.keys(files)
-      .map((filePath: string) => ({
-        path: files[filePath].path,
-        mode: files[filePath].mode,
-        type: files[filePath].type,
-        sha: files[filePath].sha,
-      }))
-      .reduce(
-        (
-          acc: { [key: string]: NewTreeRequestItem },
-          item: NewTreeRequestItem,
-        ) => ({ ...acc, [item.path]: item }),
-        {},
+      const newTreeFiles = this.copyRemoteTree(files);
+      // Add files that are in the manifest but not in the tree.
+      const localOnlyFiles = Object.keys(this.metadataStore.data.files).filter(
+        (filePath: string) => !Object.keys(files).contains(filePath),
       );
-    // Add files that are in the manifest but not in the tree.
-    await Promise.all(
-      Object.keys(this.metadataStore.data.files)
-        .filter((filePath: string) => {
-          return !Object.keys(files).contains(filePath);
-        })
-        .map(async (filePath: string) => {
+      await mapWithConcurrency(
+        localOnlyFiles,
+        MOBILE_IO_CONCURRENCY,
+        async (filePath: string) => {
           const normalizedPath = normalizePath(filePath);
           // We need to check whether the file is a text file or not before
           // reading it here because trying to read a binary file as text fails
@@ -423,19 +460,156 @@ export default class SyncManager {
             type: "blob",
             content,
           };
-        }),
-    );
-    await this.commitSync(newTreeFiles, treeSha);
+        },
+      );
+      await this.commitSync(newTreeFiles, treeSha, branchHeadSha);
+    } finally {
+      this.eventsListener.resume();
+    }
   }
 
-  private async downloadRepositoryArchiveEntries(): Promise<Entry[]> {
+  private async downloadRepositoryArchiveEntries(ref: string): Promise<Entry[]> {
     // Download the repository once instead of making a request for every file.
     const zipBuffer = await this.client.downloadRepositoryArchive({
+      ref,
       retry: true,
     });
     const zipBlob = new Blob([zipBuffer]);
     const reader = new ZipReader(new BlobReader(zipBlob));
     return await reader.getEntries();
+  }
+
+  private async stageRepositoryArchive(
+    entries: Entry[],
+    files: { [key: string]: GetTreeResponseItem },
+    protectedPaths: string[],
+    stagingPath: string,
+  ): Promise<void> {
+    await this.removeStagingDirectory(stagingPath);
+    await this.directoryEnsurer.ensure(stagingPath);
+    await this.logger.info("Staging and validating force-pull archive");
+
+    for (const entry of entries) {
+      const targetPath = this.archiveTargetPath(entry.filename);
+      if (
+        targetPath === "" ||
+        targetPath.split("/").last()?.startsWith(".") ||
+        !isExtractableArchivePath(
+          targetPath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+          protectedPaths,
+        )
+      ) {
+        continue;
+      }
+
+      const normalizedPath = normalizePath(targetPath);
+      const stagedPath = normalizePath(`${stagingPath}/${normalizedPath}`);
+      if (entry.directory) {
+        await this.directoryEnsurer.ensure(stagedPath);
+        continue;
+      }
+
+      const remoteFile = files[normalizedPath];
+      if (remoteFile === undefined) {
+        throw new Error(
+          `Cannot force pull because "${normalizedPath}" is missing from the pinned GitHub tree`,
+        );
+      }
+
+      const writer = new Uint8ArrayWriter();
+      await entry.getData!(writer);
+      const data = await writer.getData();
+      const actualSha = await this.calculateBlobSHA(data);
+      if (actualSha !== remoteFile.sha) {
+        throw new Error(
+          `Cannot force pull because "${normalizedPath}" does not match the pinned GitHub tree`,
+        );
+      }
+
+      const parentPath = stagedPath.split("/").slice(0, -1).join("/");
+      if (parentPath !== "") {
+        await this.directoryEnsurer.ensure(parentPath);
+      }
+      await this.vault.adapter.writeBinary(
+        stagedPath,
+        Uint8Array.from(data).buffer,
+      );
+    }
+    await this.logger.info("Force-pull archive staged and validated");
+  }
+
+  private async installStagedArchive(
+    stagingPath: string,
+    files: { [key: string]: GetTreeResponseItem },
+    remoteMetadata: { [key: string]: FileMetadata },
+  ): Promise<void> {
+    const pendingFolders = [stagingPath];
+    const stagedFiles: string[] = [];
+    while (pendingFolders.length > 0) {
+      const folder = pendingFolders.pop();
+      if (folder === undefined) continue;
+      const listing = await this.vault.adapter.list(folder);
+      stagedFiles.push(...listing.files);
+      pendingFolders.push(...listing.folders);
+    }
+
+    for (const stagedFilePath of stagedFiles) {
+      const targetPath = normalizePath(
+        stagedFilePath.slice(stagingPath.length + 1),
+      );
+      const parentPath = targetPath.split("/").slice(0, -1).join("/");
+      if (parentPath !== "") {
+        await this.directoryEnsurer.ensure(parentPath);
+      }
+      if (await this.vault.adapter.exists(targetPath)) {
+        await this.vault.adapter.remove(targetPath);
+      }
+      await this.vault.adapter.rename(stagedFilePath, targetPath);
+
+      this.metadataStore.data.files[targetPath] = {
+        path: targetPath,
+        sha: files[targetPath].sha,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: remoteMetadata[targetPath]?.lastModified ?? Date.now(),
+        deleted: false,
+        deletedAt: null,
+      };
+    }
+
+    await this.removeStagingDirectory(stagingPath);
+    await this.metadataStore.save();
+    await this.logger.info("Installed staged force-pull archive");
+  }
+
+  private async removeStagingDirectory(stagingPath: string): Promise<void> {
+    if (await this.vault.adapter.exists(stagingPath)) {
+      await this.vault.adapter.rmdir(stagingPath, true);
+    }
+  }
+
+  private archiveTargetPath(filename: string): string {
+    const pathParts = filename.split("/");
+    return pathParts.length > 1
+      ? pathParts.slice(1).join("/")
+      : filename;
+  }
+
+  private copyRemoteTree(files: {
+    [key: string]: GetTreeResponseItem;
+  }): { [key: string]: NewTreeRequestItem } {
+    const treeFiles: { [key: string]: NewTreeRequestItem } = {};
+    Object.values(files).forEach((file) => {
+      treeFiles[file.path] = {
+        path: file.path,
+        mode: file.mode,
+        type: file.type,
+        sha: file.sha,
+      };
+    });
+    return treeFiles;
   }
 
   private async extractRepositoryArchive(
@@ -457,9 +631,7 @@ export default class SyncManager {
       let targetPath = entry.filename;
       try {
         // GitHub ZIPs contain a root directory, which must be stripped.
-        const pathParts = entry.filename.split("/");
-        targetPath =
-          pathParts.length > 1 ? pathParts.slice(1).join("/") : entry.filename;
+        targetPath = this.archiveTargetPath(entry.filename);
 
         if (targetPath === "") {
           continue;
@@ -549,55 +721,46 @@ export default class SyncManager {
   private async firstSyncFromLocal(
     files: { [key: string]: GetTreeResponseItem },
     treeSha: string,
+    branchHeadSha: string,
   ) {
     await this.logger.info("Starting first sync from local files");
-    const newTreeFiles = Object.keys(files)
-      .map((filePath: string) => ({
-        path: files[filePath].path,
-        mode: files[filePath].mode,
-        type: files[filePath].type,
-        sha: files[filePath].sha,
-      }))
-      .reduce(
-        (
-          acc: { [key: string]: NewTreeRequestItem },
-          item: NewTreeRequestItem,
-        ) => ({ ...acc, [item.path]: item }),
-        {},
-      );
-    await Promise.all(
-      Object.keys(this.metadataStore.data.files)
-        .filter((filePath: string) => {
-          // We should not try to sync deleted files, this can happen when
-          // the user renames or deletes files after enabling the plugin but
-          // before syncing for the first time
-          return !this.metadataStore.data.files[filePath].deleted;
-        })
-        .map(async (filePath: string) => {
-          const normalizedPath = normalizePath(filePath);
-          // We need to check whether the file is a text file or not before
-          // reading it here because trying to read a binary file as text fails
-          // on iOS, and probably on other mobile devices too, so we read the file
-          // content only if we're sure it contains text only.
-          //
-          // It's fine not reading the binary file in here and just setting some bogus
-          // content because when committing the sync we're going to read the binary
-          // file and upload its blob if it needs to be synced. The important thing is
-          // that some content is set so we know the file changed locally and needs to be
-          // uploaded.
-          let content = "binaryfile";
-          if (hasTextExtension(normalizedPath)) {
-            content = await this.vault.adapter.read(normalizedPath);
-          }
-          newTreeFiles[filePath] = {
-            path: filePath,
-            mode: "100644",
-            type: "blob",
-            content,
-          };
-        }),
+    const newTreeFiles = this.copyRemoteTree(files);
+    const uploadPaths = Object.keys(this.metadataStore.data.files).filter(
+      (filePath: string) => {
+        // We should not try to sync deleted files, this can happen when
+        // the user renames or deletes files after enabling the plugin but
+        // before syncing for the first time
+        return !this.metadataStore.data.files[filePath].deleted;
+      },
     );
-    await this.commitSync(newTreeFiles, treeSha);
+    await mapWithConcurrency(
+      uploadPaths,
+      MOBILE_IO_CONCURRENCY,
+      async (filePath: string) => {
+        const normalizedPath = normalizePath(filePath);
+        // We need to check whether the file is a text file or not before
+        // reading it here because trying to read a binary file as text fails
+        // on iOS, and probably on other mobile devices too, so we read the file
+        // content only if we're sure it contains text only.
+        //
+        // It's fine not reading the binary file in here and just setting some bogus
+        // content because when committing the sync we're going to read the binary
+        // file and upload its blob if it needs to be synced. The important thing is
+        // that some content is set so we know the file changed locally and needs to be
+        // uploaded.
+        let content = "binaryfile";
+        if (hasTextExtension(normalizedPath)) {
+          content = await this.vault.adapter.read(normalizedPath);
+        }
+        newTreeFiles[filePath] = {
+          path: filePath,
+          mode: "100644",
+          type: "blob",
+          content,
+        };
+      },
+    );
+    await this.commitSync(newTreeFiles, treeSha, branchHeadSha);
   }
 
   /**
@@ -621,7 +784,9 @@ export default class SyncManager {
 
   private async syncImpl() {
     await this.logger.info("Starting sync");
+    const branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
     const { files, sha: treeSha } = await this.client.getRepoContent({
+      ref: branchHeadSha,
       retry: true,
     });
     const manifest = files[`${this.vault.configDir}/${MANIFEST_FILE_NAME}`];
@@ -641,7 +806,7 @@ export default class SyncManager {
       delete files[`${this.vault.configDir}/${LOG_FILE_NAME}`];
     }
 
-    const blob = await this.client.getBlob({ sha: manifest.sha });
+    const blob = await this.client.getBlob({ sha: manifest.sha, retry: true });
     const remoteMetadata: Metadata = JSON.parse(
       decodeBase64String(blob.content),
     );
@@ -659,8 +824,10 @@ export default class SyncManager {
         { filePaths: staleRemoteMetadataPaths },
       );
 
-      await Promise.all(
-        staleRemoteMetadataPaths.map(async (filePath) => {
+      await mapWithConcurrency(
+        staleRemoteMetadataPaths,
+        MOBILE_IO_CONCURRENCY,
+        async (filePath) => {
           delete remoteMetadata.files[filePath];
 
           const localMetadata = this.metadataStore.data.files[filePath];
@@ -674,11 +841,15 @@ export default class SyncManager {
             localMetadata.dirty = true;
             localMetadata.justDownloaded = false;
           }
-        }),
+        },
       );
     }
 
-    const conflicts = await this.findConflicts(remoteMetadata.files);
+    const localShaCache = new Map<string, string | null>();
+    const conflicts = await this.findConflicts(
+      remoteMetadata.files,
+      localShaCache,
+    );
 
     // We treat every resolved conflict as an upload SyncAction, mainly cause
     // the user has complete freedom on the edits they can apply to the conflicting files.
@@ -718,6 +889,7 @@ export default class SyncManager {
         remoteMetadata.files,
         this.metadataStore.data.files,
         conflictActions.map((action) => action.filePath),
+        localShaCache,
       )),
       ...conflictActions,
     ];
@@ -734,25 +906,12 @@ export default class SyncManager {
       });
     }
 
-    const newTreeFiles: { [key: string]: NewTreeRequestItem } = Object.keys(
-      files,
-    )
-      .map((filePath: string) => ({
-        path: files[filePath].path,
-        mode: files[filePath].mode,
-        type: files[filePath].type,
-        sha: files[filePath].sha,
-      }))
-      .reduce(
-        (
-          acc: { [key: string]: NewTreeRequestItem },
-          item: NewTreeRequestItem,
-        ) => ({ ...acc, [item.path]: item }),
-        {},
-      );
+    const newTreeFiles = this.copyRemoteTree(files);
 
-    await Promise.all(
-      actions.map(async (action) => {
+    await mapWithConcurrency(
+      actions,
+      MOBILE_IO_CONCURRENCY,
+      async (action) => {
         switch (action.type) {
           case "upload": {
             const normalizedPath = normalizePath(action.filePath);
@@ -789,14 +948,19 @@ export default class SyncManager {
           case "delete_local":
             break;
         }
-      }),
+      },
     );
 
     // Download files and delete local files
-    await Promise.all([
-      ...actions
-        .filter((action) => action.type === "download")
-        .map(async (action: SyncAction) => {
+    const localActions = actions.filter(
+      (action) =>
+        action.type === "download" || action.type === "delete_local",
+    );
+    await mapWithConcurrency(
+      localActions,
+      MOBILE_IO_CONCURRENCY,
+      async (action: SyncAction) => {
+        if (action.type === "download") {
           const remoteFile = files[action.filePath];
           if (remoteFile === undefined) {
             throw new Error(
@@ -807,15 +971,20 @@ export default class SyncManager {
             remoteFile,
             remoteMetadata.files[action.filePath].lastModified,
           );
-        }),
-      ...actions
-        .filter((action) => action.type === "delete_local")
-        .map(async (action: SyncAction) => {
+          return;
+        }
+        if (action.type === "delete_local") {
           await this.deleteLocalFile(action.filePath);
-        }),
-    ]);
+        }
+      },
+    );
 
-    await this.commitSync(newTreeFiles, treeSha, conflictResolutions);
+    await this.commitSync(
+      newTreeFiles,
+      treeSha,
+      branchHeadSha,
+      conflictResolutions,
+    );
   }
 
   /**
@@ -823,9 +992,10 @@ export default class SyncManager {
    * @param filesMetadata Remote files metadata
    * @returns List of object containing file path, remote and local content of conflicting files
    */
-  async findConflicts(filesMetadata: {
-    [key: string]: FileMetadata;
-  }): Promise<ConflictFile[]> {
+  async findConflicts(
+    filesMetadata: { [key: string]: FileMetadata },
+    localShaCache = new Map<string, string | null>(),
+  ): Promise<ConflictFile[]> {
     const commonFiles = Object.keys(filesMetadata).filter(
       (key) => key in this.metadataStore.data.files,
     );
@@ -833,8 +1003,10 @@ export default class SyncManager {
       return [];
     }
 
-    const conflicts = await Promise.all(
-      commonFiles.map(async (filePath: string) => {
+    const conflicts = await mapWithConcurrency(
+      commonFiles,
+      MOBILE_IO_CONCURRENCY,
+      async (filePath: string) => {
         if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
           // The manifest file is only internal, the user must not
           // handle conflicts for this
@@ -845,7 +1017,10 @@ export default class SyncManager {
         if (remoteFile.deleted && localFile.deleted) {
           return null;
         }
-        const actualLocalSHA = await this.calculateSHA(filePath);
+        const actualLocalSHA = await this.getOrCalculateSHA(
+          filePath,
+          localShaCache,
+        );
         const remoteFileHasBeenModifiedSinceLastSync =
           remoteFile.sha !== localFile.sha;
         const localFileHasBeenModifiedSinceLastSync =
@@ -865,31 +1040,53 @@ export default class SyncManager {
           return filePath;
         }
         return null;
-      }),
+      },
     );
 
-    return await Promise.all(
-      conflicts
-        .filter((filePath): filePath is string => filePath !== null)
-        .map(async (filePath: string) => {
-          // Load contents in parallel
-          const [remoteContent, localContent] = await Promise.all([
-            await (async () => {
-              const res = await this.client.getBlob({
-                sha: filesMetadata[filePath].sha!,
-                retry: true,
-                maxRetries: 1,
-              });
-              return decodeBase64String(res.content);
-            })(),
-            await this.vault.adapter.read(normalizePath(filePath)),
-          ]);
-          return {
-            filePath,
-            remoteContent,
-            localContent,
-          };
-        }),
+    const conflictPaths = conflicts.filter(
+      (filePath): filePath is string => filePath !== null,
+    );
+    if (this.settings.conflictHandling !== "ask") {
+      return conflictPaths.map((filePath) => ({
+        filePath,
+        remoteContent: "",
+        localContent: "",
+      }));
+    }
+
+    const binaryConflicts = conflictPaths.filter(
+      (filePath) => !hasTextExtension(filePath),
+    );
+    if (binaryConflicts.length > 0) {
+      throw new Error(
+        `Binary files conflict and cannot be merged as text: ${binaryConflicts.join(
+          ", ",
+        )}. Choose an automatic overwrite conflict policy and sync again.`,
+      );
+    }
+
+    return await mapWithConcurrency(
+      conflictPaths,
+      MOBILE_IO_CONCURRENCY,
+      async (filePath: string) => {
+        // Load contents in parallel
+        const [remoteContent, localContent] = await Promise.all([
+          (async () => {
+            const res = await this.client.getBlob({
+              sha: filesMetadata[filePath].sha!,
+              retry: true,
+              maxRetries: 1,
+            });
+            return decodeBase64String(res.content);
+          })(),
+          this.vault.adapter.read(normalizePath(filePath)),
+        ]);
+        return {
+          filePath,
+          remoteContent,
+          localContent,
+        };
+      },
     );
   }
 
@@ -906,6 +1103,7 @@ export default class SyncManager {
     remoteFiles: { [key: string]: FileMetadata },
     localFiles: { [key: string]: FileMetadata },
     conflictFiles: string[],
+    localShaCache = new Map<string, string | null>(),
   ) {
     const actions: SyncAction[] = [];
 
@@ -915,8 +1113,10 @@ export default class SyncManager {
       .filter((filePath) => !conflictFiles.contains(filePath));
 
     // Get diff for common files
-    await Promise.all(
-      commonFiles.map(async (filePath: string) => {
+    await mapWithConcurrency(
+      commonFiles,
+      MOBILE_IO_CONCURRENCY,
+      async (filePath: string) => {
         if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
           // The manifest file must never trigger any action
           return;
@@ -929,7 +1129,10 @@ export default class SyncManager {
           return;
         }
 
-        const localSHA = await this.calculateSHA(filePath);
+        const localSHA = await this.getOrCalculateSHA(
+          filePath,
+          localShaCache,
+        );
         const actionType = determineFileSyncAction(
           remoteFile,
           localFile,
@@ -938,7 +1141,7 @@ export default class SyncManager {
         if (actionType !== null) {
           actions.push({ type: actionType, filePath });
         }
-      }),
+      },
     );
 
     // Get diff for files in remote but not in local
@@ -1007,14 +1210,20 @@ export default class SyncManager {
     return await this.calculateBlobSHA(new Uint8Array(contentBuffer));
   }
 
+  private async getOrCalculateSHA(
+    filePath: string,
+    cache: Map<string, string | null>,
+  ): Promise<string | null> {
+    if (cache.has(filePath)) {
+      return cache.get(filePath)!;
+    }
+    const sha = await this.calculateSHA(filePath);
+    cache.set(filePath, sha);
+    return sha;
+  }
+
   private async calculateBlobSHA(contentBytes: Uint8Array): Promise<string> {
-    const header = new TextEncoder().encode(`blob ${contentBytes.length}\0`);
-    const store = new Uint8Array([...header, ...contentBytes]);
-    return await crypto.subtle.digest("SHA-1", store).then((hash) =>
-      Array.from(new Uint8Array(hash))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(""),
-    );
+    return await calculateGitBlobSha(contentBytes);
   }
 
   /**
@@ -1027,6 +1236,7 @@ export default class SyncManager {
   async commitSync(
     treeFiles: { [key: string]: NewTreeRequestItem },
     baseTreeSha: string,
+    parentCommitSha: string,
     conflictResolutions: ConflictResolution[] = [],
   ) {
     const metadataSnapshot = JSON.stringify(this.metadataStore.data);
@@ -1034,6 +1244,7 @@ export default class SyncManager {
       await this.commitSyncImpl(
         treeFiles,
         baseTreeSha,
+        parentCommitSha,
         conflictResolutions,
       );
     } catch (error) {
@@ -1046,6 +1257,7 @@ export default class SyncManager {
   private async commitSyncImpl(
     treeFiles: { [key: string]: NewTreeRequestItem },
     baseTreeSha: string,
+    parentCommitSha: string,
     conflictResolutions: ConflictResolution[],
   ) {
     // Update local sync time
@@ -1076,37 +1288,42 @@ export default class SyncManager {
     // also get back its SHA, so we can set it together with other files.
     // We also do that right before creating the new tree because we need the SHAs of those blob to
     // correctly create it.
-    await Promise.all(
-      Object.keys(treeFiles)
-        .filter((filePath: string) => treeFiles[filePath].content !== undefined)
-        .map(async (filePath: string) => {
-          // I don't fully trust file extensions as they're not completely reliable
-          // to determine the file type, though I feel it's ok to compromise and rely
-          // on them if it makes the plugin handle upload better on certain devices.
-          if (hasTextExtension(filePath)) {
-            const content = treeFiles[filePath].content!;
-            const sha = await this.calculateBlobSHA(
-              new TextEncoder().encode(content),
-            );
-            this.metadataStore.data.files[filePath].sha = sha;
-            return;
-          }
-
-          // We can't upload binary files by setting the content of a tree item,
-          // we first need to create a Git blob by uploading the file, then
-          // we must update the tree item to point the SHA to the blob we just created.
-          const buffer = await this.vault.adapter.readBinary(filePath);
-          const { sha } = await this.client.createBlob({
-            content: arrayBufferToBase64(buffer),
-            retry: true,
-            maxRetries: 3,
-          });
-          await this.logger.info("Created blob", filePath);
-          treeFiles[filePath].sha = sha;
-          // Can't have both sha and content set, so we delete it
-          delete treeFiles[filePath].content;
+    const uploadPaths = Object.keys(treeFiles).filter(
+      (filePath: string) => treeFiles[filePath].content !== undefined,
+    );
+    await mapWithConcurrency(
+      uploadPaths,
+      MOBILE_IO_CONCURRENCY,
+      async (filePath: string) => {
+        // I don't fully trust file extensions as they're not completely reliable
+        // to determine the file type, though I feel it's ok to compromise and rely
+        // on them if it makes the plugin handle upload better on certain devices.
+        if (hasTextExtension(filePath)) {
+          const content = treeFiles[filePath].content!;
+          const sha = await this.calculateBlobSHA(
+            new TextEncoder().encode(content),
+          );
           this.metadataStore.data.files[filePath].sha = sha;
-        }),
+          this.metadataStore.data.files[filePath].dirty = false;
+          return;
+        }
+
+        // We can't upload binary files by setting the content of a tree item,
+        // we first need to create a Git blob by uploading the file, then
+        // we must update the tree item to point the SHA to the blob we just created.
+        const buffer = await this.vault.adapter.readBinary(filePath);
+        const { sha } = await this.client.createBlob({
+          content: arrayBufferToBase64(buffer),
+          retry: true,
+          maxRetries: 3,
+        });
+        await this.logger.info("Created blob", filePath);
+        treeFiles[filePath].sha = sha;
+        // Can't have both sha and content set, so we delete it
+        delete treeFiles[filePath].content;
+        this.metadataStore.data.files[filePath].sha = sha;
+        this.metadataStore.data.files[filePath].dirty = false;
+      },
     );
 
     // Update manifest in list of new tree items
@@ -1126,20 +1343,23 @@ export default class SyncManager {
       retry: true,
     });
 
-    const branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
-
     const commitSha = await this.client.createCommit({
       // TODO: Make this configurable or find a nicer commit message
       message: "Sync",
       treeSha: newTreeSha,
-      parent: branchHeadSha,
+      parent: parentCommitSha,
+      retry: true,
     });
 
     await this.client.updateBranchHead({ sha: commitSha, retry: true });
 
     // Update the local content of all files that had conflicts we resolved
-    await Promise.all(
-      conflictResolutions.map(async (resolution) => {
+    await mapWithConcurrency(
+      conflictResolutions,
+      MOBILE_IO_CONCURRENCY,
+      async (resolution) => {
+        this.metadataStore.data.files[resolution.filePath].justDownloaded = true;
+        this.metadataStore.data.files[resolution.filePath].dirty = false;
         await this.vault.adapter.write(resolution.filePath, resolution.content);
         // Even though we set the last modified timestamp for all files with conflicts
         // just before pushing the changes to remote we do it here again because the
@@ -1148,7 +1368,8 @@ export default class SyncManager {
         // we update it again.
         this.metadataStore.data.files[resolution.filePath].lastModified =
           syncTime;
-      }),
+        this.metadataStore.data.files[resolution.filePath].dirty = false;
+      },
     );
     // Now that the sync is done and we updated the content for conflicting files
     // we can save the latest metadata to disk.
@@ -1158,7 +1379,11 @@ export default class SyncManager {
 
   async downloadFile(file: GetTreeResponseItem, lastModified: number) {
     const fileMetadata = this.metadataStore.data.files[file.path];
-    if (fileMetadata && fileMetadata.sha === file.sha) {
+    if (
+      fileMetadata &&
+      fileMetadata.sha === file.sha &&
+      (await this.vault.adapter.exists(file.path))
+    ) {
       // File already exists and has the same SHA, no need to download it again.
       return;
     }
@@ -1168,17 +1393,29 @@ export default class SyncManager {
     if (fileFolder !== "") {
       await this.directoryEnsurer.ensure(normalizePath(fileFolder));
     }
-    await this.vault.adapter.writeBinary(
-      normalizedPath,
-      base64ToArrayBuffer(blob.content),
-    );
+    const previousMetadata = this.metadataStore.data.files[file.path];
     this.metadataStore.data.files[file.path] = {
       path: file.path,
       sha: file.sha,
       dirty: false,
       justDownloaded: true,
       lastModified: lastModified,
+      deleted: false,
+      deletedAt: null,
     };
+    try {
+      await this.vault.adapter.writeBinary(
+        normalizedPath,
+        base64ToArrayBuffer(blob.content),
+      );
+    } catch (error) {
+      if (previousMetadata === undefined) {
+        delete this.metadataStore.data.files[file.path];
+      } else {
+        this.metadataStore.data.files[file.path] = previousMetadata;
+      }
+      throw error;
+    }
     await this.metadataStore.save();
   }
 
@@ -1187,7 +1424,7 @@ export default class SyncManager {
     await this.vault.adapter.remove(normalizedPath);
     this.metadataStore.data.files[filePath].deleted = true;
     this.metadataStore.data.files[filePath].deletedAt = Date.now();
-    this.metadataStore.save();
+    await this.metadataStore.save();
   }
 
   async loadMetadata() {
@@ -1242,7 +1479,7 @@ export default class SyncManager {
         justDownloaded: false,
         lastModified: Date.now(),
       };
-      this.metadataStore.save();
+      await this.metadataStore.save();
     }
     await this.logger.info("Loaded metadata");
   }
@@ -1279,7 +1516,7 @@ export default class SyncManager {
         lastModified: Date.now(),
       };
     });
-    this.metadataStore.save();
+    await this.metadataStore.save();
   }
 
   /**

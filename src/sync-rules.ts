@@ -1,4 +1,8 @@
-import { LOG_FILE_NAME, MANIFEST_FILE_NAME } from "./constants";
+import {
+  FORCE_PULL_STAGING_DIR_NAME,
+  LOG_FILE_NAME,
+  MANIFEST_FILE_NAME,
+} from "./constants";
 import type { FileMetadata } from "./metadata-store";
 import type { GitHubSyncSettings } from "./settings/settings";
 
@@ -85,6 +89,14 @@ export function determineFileSyncAction(
     return null;
   }
 
+  if (localSHA === null) {
+    // If the file disappeared without a vault deletion event, prefer restoring
+    // the known remote content over treating an absent file as an upload. This
+    // is both recoverable and avoids turning a missed mobile event into a read
+    // failure or an accidental remote deletion.
+    return "download";
+  }
+
   if (remoteFile.sha === localSHA) {
     return null;
   }
@@ -104,6 +116,8 @@ export function isSyncablePath(
   if (
     filePath === `${configDir}/workspace.json` ||
     filePath === `${configDir}/workspace-mobile.json` ||
+    filePath === `${configDir}/${FORCE_PULL_STAGING_DIR_NAME}` ||
+    filePath.startsWith(`${configDir}/${FORCE_PULL_STAGING_DIR_NAME}/`) ||
     filePath === `${configDir}/${LOG_FILE_NAME}`
   ) {
     return false;
