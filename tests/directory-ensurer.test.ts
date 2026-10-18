@@ -85,3 +85,46 @@ test("a failed directory creation can be retried", async () => {
   assert.equal(attempts, 2);
   assert.equal(exists, true);
 });
+
+test("mkdir runs even when exists() reports a false positive", async () => {
+  // Reproduces the Android force-pull FILE_NOTCREATED bug: the native adapter
+  // can report a directory under the hidden config dir as existing when it was
+  // never physically created. Guarding mkdir with exists() would skip the
+  // creation and leave later writeBinary calls writing into a missing folder.
+  const created = new Set<string>();
+  const ensurer = new DirectoryEnsurer({
+    async exists() {
+      // Always claims the path exists, mimicking the false positive.
+      return true;
+    },
+    async mkdir(path) {
+      created.add(path);
+    },
+  });
+
+  await ensurer.ensure(".obsidian/github-sync-force-pull-staging/Notes");
+
+  assert.deepEqual(
+    [...created],
+    [
+      ".obsidian",
+      ".obsidian/github-sync-force-pull-staging",
+      ".obsidian/github-sync-force-pull-staging/Notes",
+    ],
+  );
+});
+
+test("an already-exists mkdir rejection is tolerated when the directory is present", async () => {
+  // Android's adapter may reject mkdir for a directory that genuinely exists.
+  // The ensurer should treat that as success rather than propagating the error.
+  const ensurer = new DirectoryEnsurer({
+    async exists() {
+      return true;
+    },
+    async mkdir() {
+      throw new Error("FILE_NOTCREATED");
+    },
+  });
+
+  await assert.doesNotReject(ensurer.ensure("Projects/Alpha"));
+});

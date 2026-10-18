@@ -38,8 +38,19 @@ export default class DirectoryEnsurer {
     const parentPath = directoryPath.split("/").slice(0, -1).join("/");
     await this.ensure(parentPath);
 
-    if (!(await this.adapter.exists(directoryPath))) {
+    // Always attempt the mkdir rather than guarding with exists(). On Android,
+    // exists() can report a false positive for paths under the hidden config
+    // dir (e.g. ".obsidian/..."), which would skip the mkdir and leave the
+    // directory absent on the native filesystem. A later writeBinary into that
+    // missing directory then fails with the native "FILE_NOTCREATED" error.
+    // Instead we create unconditionally and treat an "already exists" rejection
+    // as success, verifying with exists() only when the mkdir actually fails.
+    try {
       await this.adapter.mkdir(directoryPath);
+    } catch (error) {
+      if (!(await this.adapter.exists(directoryPath))) {
+        throw error;
+      }
     }
   }
 }
