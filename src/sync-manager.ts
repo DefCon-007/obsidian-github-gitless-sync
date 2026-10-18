@@ -1,5 +1,6 @@
 import {
   Vault,
+  Platform,
   normalizePath,
   base64ToArrayBuffer,
   arrayBufferToBase64,
@@ -33,6 +34,7 @@ import {
   determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
+  hasAndroidUnsafePathSegment,
   isExtractableArchivePath,
   isSyncablePath,
   shouldDeleteLocalPathForForcePull,
@@ -489,6 +491,12 @@ export default class SyncManager {
     await this.directoryEnsurer.ensure(stagingPath);
     await this.logger.info("Staging and validating force-pull archive");
 
+    // Fail fast on filenames the current platform cannot write, before any
+    // staged write and before the local wipe. On Android this prevents an
+    // opaque native "FILE_NOTCREATED" crash mid-stage and tells the user
+    // exactly which files to rename in the repository.
+    this.assertArchivePathsWritable(entries, protectedPaths);
+
     for (const entry of entries) {
       const targetPath = this.archiveTargetPath(entry.filename);
       if (
@@ -538,6 +546,55 @@ export default class SyncManager {
       );
     }
     await this.logger.info("Force-pull archive staged and validated");
+  }
+
+  /**
+   * Throws if the archive contains files whose names the current platform's
+   * filesystem cannot represent. Only enforced on Android, where characters
+   * that are legal on desktop (and therefore legal in the GitHub repository)
+   * make the native adapter reject the write with "FILE_NOTCREATED". The error
+   * names the offending files so the user can rename them in the repository.
+   */
+  private assertArchivePathsWritable(
+    entries: Entry[],
+    protectedPaths: string[],
+  ): void {
+    if (!Platform.isAndroidApp) {
+      return;
+    }
+
+    const unsafePaths: string[] = [];
+    for (const entry of entries) {
+      if (entry.directory) {
+        continue;
+      }
+      const targetPath = this.archiveTargetPath(entry.filename);
+      if (
+        targetPath === "" ||
+        targetPath.split("/").last()?.startsWith(".") ||
+        !isExtractableArchivePath(
+          targetPath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+          protectedPaths,
+        )
+      ) {
+        continue;
+      }
+      if (hasAndroidUnsafePathSegment(targetPath)) {
+        unsafePaths.push(targetPath);
+      }
+    }
+
+    if (unsafePaths.length > 0) {
+      throw new Error(
+        "Cannot force pull because these files have names that Android cannot " +
+          "store (characters such as : \" ? * < > | \\ or a trailing dot or " +
+          `space). Rename them in the GitHub repository, then try again: ${unsafePaths
+            .sort()
+            .join(", ")}`,
+      );
+    }
   }
 
   private async installStagedArchive(

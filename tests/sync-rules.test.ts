@@ -5,6 +5,7 @@ import {
   determineFileSyncAction,
   findStaleRemoteMetadataPaths,
   FIRST_SYNC_BOTH_SIDES_ERROR,
+  hasAndroidUnsafePathSegment,
   isExtractableArchivePath,
   isSyncablePath,
   needsFirstSync,
@@ -341,4 +342,45 @@ test("a genuinely newer remote edit can supersede a local deletion", () => {
     ),
     "download",
   );
+});
+
+test("ordinary paths are safe to write on Android", () => {
+  assert.equal(hasAndroidUnsafePathSegment("Projects/Alpha/Notes.md"), false);
+  assert.equal(hasAndroidUnsafePathSegment("a file with spaces.md"), false);
+  assert.equal(hasAndroidUnsafePathSegment("emoji-📓.md"), false);
+});
+
+test("reserved characters make a path unsafe on Android", () => {
+  for (const name of [
+    "C* Garbage collection.md",
+    "ratio 3:4.md",
+    'quote".md',
+    "why?.md",
+    "a<b.md",
+    "a>b.md",
+    "a|b.md",
+    "back\\slash.md",
+  ]) {
+    assert.equal(
+      hasAndroidUnsafePathSegment(name),
+      true,
+      `expected "${name}" to be unsafe`,
+    );
+  }
+});
+
+test("an unsafe segment anywhere in the path is detected", () => {
+  assert.equal(
+    hasAndroidUnsafePathSegment("Notes/Meeting: Monday/agenda.md"),
+    true,
+  );
+});
+
+test("a trailing dot or space on a segment is unsafe on Android", () => {
+  assert.equal(hasAndroidUnsafePathSegment("folder/draft.md "), true);
+  assert.equal(hasAndroidUnsafePathSegment("folder./note.md"), true);
+});
+
+test("control characters make a path unsafe on Android", () => {
+  assert.equal(hasAndroidUnsafePathSegment("bad\u0007name.md"), true);
 });

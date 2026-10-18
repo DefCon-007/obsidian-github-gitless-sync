@@ -187,3 +187,33 @@ export function automaticConflictAction(
   }
   return null;
 }
+
+/**
+ * Characters that Android's filesystem rejects in a path segment. These are the
+ * Windows/FAT reserved characters plus ASCII control characters. Obsidian on
+ * desktop lets users create files containing them (it only blocks characters
+ * forbidden by the current OS), but writing such a file through the Android
+ * adapter fails with a native "FILE_NOTCREATED" error. Forward slash is the
+ * path separator and is handled structurally, so it is not listed here.
+ */
+// eslint-disable-next-line no-control-regex
+const ANDROID_FORBIDDEN_SEGMENT_CHARS = /[<>:"\\|?*\u0000-\u001f]/;
+
+/**
+ * Returns true when any segment of the given vault-relative path contains a
+ * character the Android filesystem cannot represent. A trailing dot or space on
+ * a segment is also rejected because Android (like Windows/FAT) silently strips
+ * them, which breaks the exact-path round trip the sync relies on.
+ */
+export function hasAndroidUnsafePathSegment(filePath: string): boolean {
+  return filePath.split("/").some((segment) => {
+    if (segment === "") {
+      return false;
+    }
+    if (ANDROID_FORBIDDEN_SEGMENT_CHARS.test(segment)) {
+      return true;
+    }
+    const lastChar = segment[segment.length - 1];
+    return lastChar === "." || lastChar === " ";
+  });
+}
